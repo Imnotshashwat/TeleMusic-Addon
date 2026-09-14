@@ -264,7 +264,8 @@ async function parseTrackMessage(msg) {
 // ── Smart Audio Quality Deduplication & Channel Notifications ──────────────
 
 function getQualityScore(track) {
-  const isLossless = ['flac', 'wav', 'alac'].includes(track.format);
+  const fmt = (track.format || '').toLowerCase();
+  const isLossless = ['flac', 'wav', 'alac'].includes(fmt);
   if (isLossless) {
     const bits = track.bitDepth || 16;
     const rate = track.sampleRate || 44100;
@@ -276,12 +277,21 @@ function getQualityScore(track) {
     // 16-bit / 44.1kHz = 1,705,600
     return 1000000 + (bits * rate);
   }
-  // Lossy formats (mp3, aac, opus, m4a): score by calculated kbps (max 320)
-  let kbps = 320;
+
+  // Lossy formats (opus, aac, m4a, mp3, ogg)
+  let rawKbps = 320;
   if (track.sizeBytes && track.duration) {
-    kbps = Math.round((track.sizeBytes * 8) / (track.duration * 1000));
+    rawKbps = Math.round((track.sizeBytes * 8) / (track.duration * 1000));
   }
-  return Math.min(kbps, 320);
+
+  // Codec efficiency multiplier for fair quality comparison:
+  // Opus is modern and outperforms MP3 at lower bitrates (160kbps Opus ~ 320kbps MP3)
+  // AAC / M4A has higher coding efficiency than MP3 (256kbps AAC ~ 320kbps MP3)
+  let multiplier = 1.0;
+  if (fmt === 'opus') multiplier = 1.5;
+  else if (fmt === 'aac' || fmt === 'm4a') multiplier = 1.25;
+
+  return Math.round(rawKbps * multiplier);
 }
 
 function formatBytes(bytes) {
@@ -292,17 +302,18 @@ function formatBytes(bytes) {
 }
 
 function describeTrackQuality(track) {
+  const fmt = (track.format || 'mp3').toUpperCase();
   if (track.bitDepth && track.sampleRate) {
-    return `${track.bitDepth}-bit / ${(track.sampleRate / 1000).toFixed(1)}kHz FLAC`;
+    return `${track.bitDepth}-bit / ${(track.sampleRate / 1000).toFixed(1)}kHz ${fmt}`;
   }
-  if (['flac', 'wav', 'alac'].includes(track.format)) {
-    return '16-bit / 44.1kHz FLAC';
+  if (['FLAC', 'WAV', 'ALAC'].includes(fmt)) {
+    return `16-bit / 44.1kHz ${fmt} (Lossless)`;
   }
   let kbps = 320;
   if (track.sizeBytes && track.duration) {
     kbps = Math.round((track.sizeBytes * 8) / (track.duration * 1000));
   }
-  return `${(track.format || 'mp3').toUpperCase()} (${Math.min(kbps, 320)}kbps)`;
+  return `${fmt} (~${kbps}kbps)`;
 }
 
 function normalizeTitle(t) {

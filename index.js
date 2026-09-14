@@ -593,7 +593,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music Addon',
-    version: '1.9.1',
+    version: `1.9.1 (${trackIndex.length} songs)`,
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],

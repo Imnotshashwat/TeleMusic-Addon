@@ -198,8 +198,8 @@ async function parseTrackMessage(msg) {
   let bitDepth = undefined;
   let isrc = undefined;
 
-  // Try to inspect the first 128KB for lossless FLAC/ALAC tags or missing title/performer
-  const shouldSniffTags = resolvedExt === 'flac' || resolvedExt === 'alac' || !audioAttr || !audioAttr.title;
+  // Try to inspect the first 128KB for lossless FLAC/ALAC/WAV tags or missing title/performer
+  const shouldSniffTags = resolvedExt === 'flac' || resolvedExt === 'alac' || resolvedExt === 'wav' || !audioAttr || !audioAttr.title;
   if (shouldSniffTags && sizeBytes > 0) {
     try {
       const headerBuf = await getHeaderChunk(msg.media, Math.min(128 * 1024, sizeBytes));
@@ -229,13 +229,19 @@ async function parseTrackMessage(msg) {
     }
   }
 
-  // Quality badge text (e.g. "24-bit / 96000Hz lossless" or "FLAC lossless")
+  // Quality badge text (e.g. "24-bit / 96.0kHz FLAC" or "16-bit / 44.1kHz FLAC" or "MP3 (320kbps)")
   const formatName = EXT_TO_FORMAT[resolvedExt] || resolvedExt;
   let qualityText = formatName.toUpperCase();
   if (bitDepth && sampleRate) {
-    qualityText = `${bitDepth}-bit / ${sampleRate}Hz lossless`;
+    qualityText = `${bitDepth}-bit / ${(sampleRate / 1000).toFixed(1)}kHz FLAC`;
   } else if (['flac', 'wav', 'alac'].includes(formatName)) {
-    qualityText = 'Lossless';
+    qualityText = '16-bit / 44.1kHz FLAC Lossless';
+  } else {
+    let kbps = 320;
+    if (sizeBytes && duration) {
+      kbps = Math.round((sizeBytes * 8) / (duration * 1000));
+    }
+    qualityText = `${formatName.toUpperCase()} (${Math.min(kbps, 320)}kbps)`;
   }
 
   return {
@@ -253,6 +259,213 @@ async function parseTrackMessage(msg) {
     sizeBytes,
     mimeType: doc.mimeType || 'audio/mpeg',
   };
+}
+
+// ── Smart Audio Quality Deduplication & Channel Notifications ──────────────
+
+function getQualityScore(track) {
+  const isLossless = ['flac', 'wav', 'alac'].includes(track.format);
+  if (isLossless) {
+    const bits = track.bitDepth || 16;
+    const rate = track.sampleRate || 44100;
+    // Lossless base score is 1,000,000 + (bitDepth * sampleRate)
+    // 24-bit / 192kHz = 5,608,000
+    // 24-bit / 96kHz  = 3,304,000
+    // 24-bit / 48kHz  = 2,152,000
+    // 24-bit / 44.1kHz = 2,058,400
+    // 16-bit / 44.1kHz = 1,705,600
+    return 1000000 + (bits * rate);
+  }
+  // Lossy formats (mp3, aac, opus, m4a): score by calculated kbps (max 320)
+  let kbps = 320;
+  if (track.sizeBytes && track.duration) {
+    kbps = Math.round((track.sizeBytes * 8) / (track.duration * 1000));
+  }
+  return Math.min(kbps, 320);
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
+function describeTrackQuality(track) {
+  if (track.bitDepth && track.sampleRate) {
+    return `${track.bitDepth}-bit / ${(track.sampleRate / 1000).toFixed(1)}kHz FLAC`;
+  }
+  if (['flac', 'wav', 'alac'].includes(track.format)) {
+    return '16-bit / 44.1kHz FLAC';
+  }
+  let kbps = 320;
+  if (track.sizeBytes && track.duration) {
+    kbps = Math.round((track.sizeBytes * 8) / (track.duration * 1000));
+  }
+  return `${(track.format || 'mp3').toUpperCase()} (${Math.min(kbps, 320)}kbps)`;
+}
+
+function normalizeTitle(t) {
+  if (!t) return '';
+  return t
+    .toLowerCase()
+    .replace(/\((?:from|official|audio|video|lyrics|full song|remastered|hd|hq|club mix|feat\.?|ft\.?).*?\)/gi, '')
+    .replace(/\[(?:from|official|audio|video|lyrics|full song|remastered|hd|hq|club mix|feat\.?|ft\.?).*?\]/gi, '')
+    .replace(/[^\w\s]/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeArtist(a) {
+  if (!a || a.toLowerCase() === 'unknown artist') return '';
+  return a
+    .toLowerCase()
+    .replace(/[^\w\s]/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isDuplicate(a, b) {
+  if (a.id === b.id) return false;
+
+  // Duration safeguard: if both tracks have known duration, they must match within 5 seconds
+  if (a.duration && b.duration && Math.abs(a.duration - b.duration) > 5) {
+    return false;
+  }
+
+  const titleA = normalizeTitle(a.title);
+  const titleB = normalizeTitle(b.title);
+  if (!titleA || !titleB) return false;
+
+  if (titleA === titleB) {
+    const artistA = normalizeArtist(a.artist);
+    const artistB = normalizeArtist(b.artist);
+    if (artistA && artistB) {
+      const wordsA = artistA.split(' ').filter((w) => w.length > 2);
+      const wordsB = artistB.split(' ').filter((w) => w.length > 2);
+      const hasCommonArtist = wordsA.some((w) => artistB.includes(w)) || wordsB.some((w) => artistA.includes(w));
+      return hasCommonArtist;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+async function sendChannelNotification(text) {
+  try {
+    if (channelEntity) {
+      await client.sendMessage(channelEntity, { message: text });
+      console.log('[Channel Notification Sent]');
+    }
+  } catch (err) {
+    console.warn('[Channel Notification Error]:', err.message);
+  }
+}
+
+async function deleteTelegramMessage(messageId) {
+  try {
+    const id = parseInt(messageId, 10);
+    if (channelEntity && id) {
+      await client.deleteMessages(channelEntity, [id], { revoke: true });
+      console.log(`[Deleted Telegram Message] ID: ${id}`);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`[Delete Message Error] ID ${messageId}:`, err.message);
+  }
+  return false;
+}
+
+async function processTrackUpload(newTrack) {
+  const existingDup = trackIndex.find((t) => isDuplicate(t, newTrack));
+  if (!existingDup) {
+    trackIndex.unshift(newTrack);
+    saveCache();
+    console.log(`Auto-indexed new track: "${newTrack.title}" by "${newTrack.artist}" (${describeTrackQuality(newTrack)})`);
+    return newTrack;
+  }
+
+  const scoreNew = getQualityScore(newTrack);
+  const scoreOld = getQualityScore(existingDup);
+
+  console.log(`Duplicate detected for "${newTrack.title}"! Incoming score: ${scoreNew}, Existing score: ${scoreOld}`);
+
+  if (scoreNew > scoreOld) {
+    // Incoming track is HIGHER quality (e.g. 24/192 replacing 16/44.1, or FLAC replacing MP3)
+    console.log(`Upgrading "${newTrack.title}" from ${describeTrackQuality(existingDup)} to ${describeTrackQuality(newTrack)}`);
+
+    await deleteTelegramMessage(existingDup.id);
+
+    const oldIdx = trackIndex.findIndex((t) => t.id === existingDup.id);
+    if (oldIdx >= 0) {
+      trackIndex.splice(oldIdx, 1);
+    }
+    trackIndex.unshift(newTrack);
+    saveCache();
+
+    const notif =
+      `🗑️ Duplicate Removed (Quality Upgrade)\n\n` +
+      `🎵 Track: ${newTrack.title} — ${newTrack.artist}\n` +
+      `✅ Kept (New): ${describeTrackQuality(newTrack)} [${formatBytes(newTrack.sizeBytes)}]\n` +
+      `❌ Deleted (Old): ${describeTrackQuality(existingDup)} [${formatBytes(existingDup.sizeBytes)}]\n` +
+      `💡 Reason: Higher resolution audio detected. Automatically upgraded your library!`;
+    await sendChannelNotification(notif);
+
+    return newTrack;
+  } else {
+    // Incoming track is LOWER or EQUAL quality: delete incoming upload!
+    console.log(`Discarding incoming duplicate of "${newTrack.title}". Keeping existing ${describeTrackQuality(existingDup)}.`);
+
+    await deleteTelegramMessage(newTrack.id);
+
+    const isLower = scoreNew < scoreOld;
+    const notif =
+      `🗑️ Duplicate Removed\n\n` +
+      `🎵 Track: ${newTrack.title} — ${newTrack.artist}\n` +
+      `✅ Kept (Library): ${describeTrackQuality(existingDup)} [${formatBytes(existingDup.sizeBytes)}]\n` +
+      `❌ Deleted (Upload): ${describeTrackQuality(newTrack)} [${formatBytes(newTrack.sizeBytes)}]\n` +
+      `💡 Reason: ${isLower ? 'Channel already contains a higher quality version.' : 'Exact duplicate already present in library.'}`;
+    await sendChannelNotification(notif);
+
+    return null;
+  }
+}
+
+async function deduplicateEntireLibrary() {
+  console.log('Scanning library for duplicates...');
+  const removed = [];
+  const sorted = [...trackIndex].sort((a, b) => getQualityScore(b) - getQualityScore(a));
+  const kept = [];
+
+  for (const track of sorted) {
+    const dup = kept.find((k) => isDuplicate(k, track));
+    if (!dup) {
+      kept.push(track);
+    } else {
+      console.log(`Removing duplicate: "${track.title}" (ID: ${track.id}) in favor of (ID: ${dup.id})`);
+      await deleteTelegramMessage(track.id);
+      removed.push({ deleted: track, kept: dup });
+
+      const notif =
+        `🗑️ Duplicate Cleaned\n\n` +
+        `🎵 Track: ${dup.title} — ${dup.artist}\n` +
+        `✅ Kept: ${describeTrackQuality(dup)} [${formatBytes(dup.sizeBytes)}]\n` +
+        `❌ Deleted: ${describeTrackQuality(track)} [${formatBytes(track.sizeBytes)}]\n` +
+        `💡 Reason: Library cleanup: lower/duplicate quality removed.`;
+      await sendChannelNotification(notif);
+    }
+  }
+
+  if (removed.length > 0) {
+    trackIndex = kept;
+    saveCache();
+    console.log(`Deduplication complete! Removed ${removed.length} duplicate(s).`);
+  } else {
+    console.log('Deduplication check: Library is 100% clean, no duplicates found.');
+  }
+
+  return { checked: sorted.length, duplicatesRemoved: removed.length, removed };
 }
 
 async function buildTrackIndex() {
@@ -284,6 +497,7 @@ async function buildTrackIndex() {
     lastIndexed = Date.now();
     saveCache();
     console.log(`Indexing complete! ${trackIndex.length} track(s) ready in library.`);
+    await deduplicateEntireLibrary();
   } catch (err) {
     console.error('Error during track indexing:', err.message);
   }
@@ -300,12 +514,32 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.2.0',
-    description: 'Personal hi-res and lossless music library streamed directly from Telegram',
+    version: '1.3.0',
+    description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
     contentType: 'music',
   });
+});
+
+// Deduplication trigger endpoint: triggers on-demand library scan and cleaning
+app.get('/deduplicate', async (req, res) => {
+  try {
+    const result = await deduplicateEntireLibrary();
+    res.json({
+      status: 'ok',
+      checkedTracks: result.checked,
+      duplicatesRemoved: result.duplicatesRemoved,
+      details: result.removed.map((r) => ({
+        track: r.kept.title,
+        artist: r.kept.artist,
+        kept: describeTrackQuality(r.kept),
+        deleted: describeTrackQuality(r.deleted),
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Search: BitChord calls /search?q=... to find tracks
@@ -594,17 +828,10 @@ async function resolveChannel() {
           if (peerId !== targetChanId) return;
         }
 
-        console.log(`Detected new upload in channel (msg ID: ${message.id}), auto-indexing...`);
+        console.log(`Detected new upload in channel (msg ID: ${message.id}), processing track...`);
         const track = await parseTrackMessage(message);
         if (track) {
-          const existingIdx = trackIndex.findIndex((t) => t.id === track.id);
-          if (existingIdx >= 0) {
-            trackIndex[existingIdx] = track;
-          } else {
-            trackIndex.unshift(track);
-          }
-          saveCache();
-          console.log(`Auto-indexed new track: "${track.title}" by "${track.artist}"`);
+          await processTrackUpload(track);
         }
       } catch (err) {
         console.warn('Real-time indexing error:', err.message);

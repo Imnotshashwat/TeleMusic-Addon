@@ -12,7 +12,7 @@ Stream lossless and hi-res audio from a private Telegram channel into the BitCho
 └────────────────┬────────────────┘
                  │ MTProto
 ┌────────────────▼────────────────┐
-│   TeleMusic Addon Server        │ (Node.js, GramJS, Express)
+│   Telegram Music Addon Server   │ (Node.js, GramJS, Express)
 │   - /manifest.json              │
 │   - /search?q=...               │
 │   - /stream/:id                 │

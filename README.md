@@ -33,8 +33,8 @@ BitChord searches this server whenever a track is requested. If the track is pre
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/Imnotshashwat/TeleMusic-Addon.git
-cd TeleMusic-Addon
+git clone https://github.com/Imnotshashwat/Telegram-Music-Addon.git
+cd Telegram-Music-Addon
 npm install
 ```
 

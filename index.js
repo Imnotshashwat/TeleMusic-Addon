@@ -536,7 +536,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.6.0',
+    version: '1.7.0',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -564,46 +564,119 @@ app.get('/deduplicate', async (req, res) => {
   }
 });
 
-const SEARCH_STOP_WORDS = new Set([
-  'by', 'the', 'a', 'an', 'and', 'or', 'feat', 'ft', 'featuring',
-  'song', 'audio', 'video', 'official', 'full', 'mp3', 'flac'
-]);
+const ARTIST_SEPARATORS_REGEX = /\s*(?:[,&/;·|]|\band\b|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*/i;
+const BRACKETED_REGEX = /[([][^()[\]]*[)\]]/g;
+const NOISE_WORDS_REGEX = /\b(?:official|video|audio|lyrics|lyric|lyrical|song|songs|full|hd|hq|4k|mp3|flac|ost|soundtrack|remaster|remastered)\b/gi;
 
-function matchTrack(t, query) {
-  if (!query) return true;
-  const qNorm = query.toLowerCase().trim();
-  const fullText = `${t.title} ${t.artist} ${t.album || ''}`.toLowerCase();
+function extractCoreTitle(title) {
+  if (!title) return '';
+  let clean = title.toLowerCase();
+  clean = clean.replace(BRACKETED_REGEX, ' ');
+  clean = clean.replace(NOISE_WORDS_REGEX, ' ');
+  clean = clean.replace(/[^a-z0-9\s]/g, ' ');
+  return clean.replace(/\s+/g, ' ').trim();
+}
 
-  // 1. Direct substring check (fast path)
-  if (fullText.includes(qNorm)) return true;
-
-  // 2. Tokenize without punctuation & stop words
-  const terms = qNorm.replace(/[^\w\s]/g, ' ').split(/\s+/).filter((w) => w.length > 0 && !SEARCH_STOP_WORDS.has(w));
-  if (terms.length === 0) return true;
-
-  const titleWords = t.title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
-  const artistWords = t.artist.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
-  const allWords = new Set([...titleWords, ...artistWords, ...(t.album || '').toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/)]);
-
-  // 3. Title match: all title words present in query
-  const titleMatched = titleWords.length > 0 && titleWords.every((tw) => terms.includes(tw));
-  if (titleMatched) {
-    const hasArtistWord = artistWords.some((aw) => terms.includes(aw));
-    if (hasArtistWord || terms.length <= titleWords.length) {
-      return true;
+function parseArtistTokens(artistStr) {
+  if (!artistStr) return [];
+  const parts = artistStr.toLowerCase().split(ARTIST_SEPARATORS_REGEX);
+  const result = [];
+  for (const p of parts) {
+    const words = p.replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 1);
+    if (words.length > 0) {
+      result.push(words);
     }
   }
+  return result;
+}
 
-  // 4. Token similarity: at least 60% of search terms match track tokens
-  const matchCount = terms.filter((term) => {
-    return Array.from(allWords).some((w) => {
-      if (w === term) return true;
-      if (w.length >= 4 && term.length >= 4 && (w.startsWith(term) || term.startsWith(w))) return true;
-      return false;
-    });
-  }).length;
+function runOf(outer, inner) {
+  if (!inner.length || inner.length > outer.length) return false;
+  for (let i = 0; i <= outer.length - inner.length; i++) {
+    let match = true;
+    for (let j = 0; j < inner.length; j++) {
+      if (outer[i + j] !== inner[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
 
-  return (matchCount / terms.length) >= 0.6;
+function sameArtist(aWords, bWords) {
+  return runOf(aWords, bWords) || runOf(bWords, aWords);
+}
+
+function sharesArtist(queryArtistStr, trackArtistStr) {
+  const queryArtists = parseArtistTokens(queryArtistStr);
+  const trackArtists = parseArtistTokens(trackArtistStr);
+  if (queryArtists.length === 0 || trackArtists.length === 0) return false;
+
+  return queryArtists.some((q) => trackArtists.some((t) => sameArtist(q, t)));
+}
+
+function scoreTrackMatch(track, query) {
+  if (!query) return 100;
+  const qClean = query.toLowerCase().trim();
+  const trackTitleCore = extractCoreTitle(track.title);
+  const trackArtist = (track.artist || '').toLowerCase();
+  const trackAlbum = (track.album || '').toLowerCase();
+
+  // Fast direct match
+  const fullText = `${track.title} ${track.artist} ${track.album || ''}`.toLowerCase();
+  if (fullText.includes(qClean)) return 180;
+
+  const queryCore = extractCoreTitle(qClean);
+
+  // 1. Exact Core Title Match
+  if (queryCore === trackTitleCore) {
+    return 100;
+  }
+
+  // 2. Query begins with Track Core Title (e.g. "party on my mind pritam")
+  if (queryCore.startsWith(trackTitleCore) || trackTitleCore.startsWith(queryCore)) {
+    const extraWords = queryCore.replace(trackTitleCore, '').trim();
+    if (!extraWords) {
+      return 100;
+    }
+    // Check if extra words match any artist using BitChord's sameArtist/runOf
+    if (sharesArtist(extraWords, track.artist)) {
+      return 150; // Exact title + verified shared artist = Top Match!
+    }
+    // Check if extra words match album
+    if (trackAlbum && trackAlbum.includes(extraWords)) {
+      return 120;
+    }
+    // Title matched, but extra words were completely wrong artist!
+    return 0;
+  }
+
+  // 3. Token-based fallback matching
+  const queryTokens = qClean.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 1);
+  const titleTokens = trackTitleCore.split(/\s+/).filter(Boolean);
+  const allTrackTokens = new Set([
+    ...titleTokens,
+    ...trackArtist.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
+    ...trackAlbum.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
+  ]);
+
+  const allTitleMatched = titleTokens.length > 0 && titleTokens.every((tw) => queryTokens.includes(tw));
+  if (allTitleMatched) {
+    const hasArtistToken = queryTokens.some((qw) => !titleTokens.includes(qw) && allTrackTokens.has(qw));
+    return hasArtistToken ? 140 : 90;
+  }
+
+  const matchCount = queryTokens.filter((t) => allTrackTokens.has(t)).length;
+  const ratio = matchCount / queryTokens.length;
+  if (ratio >= 0.6) {
+    return Math.round(ratio * 80);
+  }
+
+  return 0;
 }
 
 async function onTrackForwarded(msg) {
@@ -618,10 +691,10 @@ async function onTrackForwarded(msg) {
   }
 }
 
-// Search: BitChord calls /search?q=... to find tracks
+// Search: BitChord calls /search?q=... to find tracks (100% in-memory for instant < 5ms response!)
 app.get('/search', async (req, res) => {
   try {
-    // Refresh index periodically (every 30 minutes)
+    // Refresh index periodically in background (every 30 minutes)
     if (Date.now() - lastIndexed > 30 * 60 * 1000) {
       buildTrackIndex().catch((e) => console.error('Background index error:', e.message));
     }
@@ -631,28 +704,11 @@ app.get('/search', async (req, res) => {
 
     let matches = trackIndex;
     if (q) {
-      matches = trackIndex.filter((t) => matchTrack(t, q));
-
-      // If track is not found in memory index, quick-sync the latest 10 channel messages
-      // to immediately catch any newly forwarded/uploaded songs!
-      if (matches.length === 0 && channelEntity) {
-        try {
-          const recentMsgs = await client.getMessages(channelEntity, { limit: 10 });
-          let foundNew = false;
-          for (const m of recentMsgs) {
-            if (m.media && m.media.document && !trackIndex.some((t) => t.id === String(m.id))) {
-              const t = await parseTrackMessage(m);
-              if (t) {
-                await processTrackUpload(t);
-                foundNew = true;
-              }
-            }
-          }
-          if (foundNew) {
-            matches = trackIndex.filter((t) => matchTrack(t, q));
-          }
-        } catch (_) {}
-      }
+      matches = trackIndex
+        .map((t) => ({ track: t, score: scoreTrackMatch(t, q) }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map((item) => item.track);
     }
 
     res.json({
@@ -859,7 +915,7 @@ app.get('/refresh', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.6.0',
+    version: '1.7.0',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,

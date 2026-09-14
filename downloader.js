@@ -219,37 +219,19 @@ async function handleSongCommand(client, channelEntity, commandText, originalMsg
         requestedOption = parseInt(numMatch[2], 10);
       }
 
-      await updateStatus(`🔍 Searching Apple Music catalog for **"${query}"**...`);
-      const candidates = await searchAppleMusic(query);
-
-      if (candidates.length > 0) {
-        let selectedCandidate = null;
-        if (requestedOption && requestedOption >= 1 && requestedOption <= candidates.length) {
-          selectedCandidate = candidates[requestedOption - 1];
-        } else {
-          // Score candidates to pick the best original track
-          const scored = candidates.map(c => ({
-            candidate: c,
-            score: scoreAppleMusicCandidate(c, query)
-          }));
-          scored.sort((a, b) => b.score - a.score);
-          selectedCandidate = scored[0].candidate;
-        }
-
-        chosenTrackInfo = selectedCandidate;
-        await updateStatus(`📥 Found **${selectedCandidate.artist} - ${selectedCandidate.title}** (${selectedCandidate.durationStr})\n⏳ Downloading Studio ALAC Lossless...`);
-
-        try {
-          audioDocMsg = await downloadFromAppleMusic(client, selectedCandidate.url, updateStatus);
-        } catch (appleErr) {
-          console.warn('[Downloader] Apple Music bot failed/timed out, trying @MusicsHuntersbot fallback:', appleErr.message);
-          await updateStatus(`⚠️ Apple Music busy, falling back to @MusicsHuntersbot FLAC...`);
-          audioDocMsg = await downloadFromMusicsHunters(client, query, requestedOption || 1, updateStatus);
-        }
-      } else {
-        // Fallback directly to @MusicsHuntersbot if Apple returned 0 results
-        await updateStatus(`🔍 Not found on Apple Music, querying @MusicsHuntersbot FLAC...`);
+      await updateStatus(`🔍 Searching Deezer / Qobuz for **"${query}"** in Lossless FLAC...`);
+      try {
         audioDocMsg = await downloadFromMusicsHunters(client, query, requestedOption || 1, updateStatus);
+      } catch (flacErr) {
+        console.warn('[Downloader] @MusicsHuntersbot failed, trying Apple Music fallback:', flacErr.message);
+        await updateStatus(`⚠️ Deezer busy, checking Apple Music...`);
+        const candidates = await searchAppleMusic(query);
+        if (candidates.length > 0) {
+          const selected = candidates[0];
+          audioDocMsg = await downloadFromAppleMusic(client, selected.url, updateStatus);
+        } else {
+          throw flacErr;
+        }
       }
     }
 

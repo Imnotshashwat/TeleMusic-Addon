@@ -1,5 +1,5 @@
 {
-  "name": "telegram-eclipse-addon",
+  "name": "telegram-music-addon",
   "version": "1.0.0",
   "description": "BitChord music provider that streams lossless audio directly from a Telegram channel",
   "main": "index.js",

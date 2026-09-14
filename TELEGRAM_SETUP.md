@@ -1,18 +1,18 @@
-# BitChord Addon — Telegram Music Server
+# BitChord Addon: Telegram Music Server
 
-Stream your personal lossless / hi-res audio files directly from a private Telegram channel into the **BitChord** YouTube Music Android app (with YouTube Music as automatic fallback).
+Stream lossless and hi-res audio from a private Telegram channel into the BitChord Android app, falling back to YouTube Music when a track is not in your library.
 
 ---
 
-## Architecture & How It Works
+## Architecture
 
 ```
 ┌─────────────────────────────────┐
-│     Telegram Private Channel    │ (Unlimited lossless/FLAC storage)
+│     Telegram Private Channel    │ (Storage for FLAC audio files)
 └────────────────┬────────────────┘
-                 │ MTProto (User Session)
+                 │ MTProto
 ┌────────────────▼────────────────┐
-│   TeleMusic Addon Server        │ (Node.js + GramJS + Express)
+│   TeleMusic Addon Server        │ (Node.js, GramJS, Express)
 │   - /manifest.json              │
 │   - /search?q=...               │
 │   - /stream/:id                 │
@@ -27,60 +27,61 @@ Stream your personal lossless / hi-res audio files directly from a private Teleg
 
 ---
 
-## Security & Privacy Note
+## Security
 
-- This server logs in using a real Telegram user session (not a Bot API token). A user session is required because the standard Telegram Bot API has a strict 20MB file download limit, whereas hi-res FLAC tracks frequently exceed 30MB–100MB+.
-- **Keep your session string secret**: The session string acts like a password. Never commit `.env` or session strings to public repositories.
-- *Recommended*: You can create a dedicated/secondary Telegram account specifically for your music channel library, or revoke the session at any time via **Telegram Settings → Devices**.
-
----
-
-## Step 1: Get Telegram API ID & Hash
-
-1. Log in to **[https://my.telegram.org](https://my.telegram.org)** with your Telegram phone number.
-2. Click on **API development tools**.
-3. Create a basic application (App title and short name can be anything, e.g. `BitChordMusic`).
-4. Copy your **`api_id`** (numeric) and **`api_hash`** (string).
+- This server logs in using a Telegram user session rather than a Bot API token. A user session avoids the standard 20MB bot download limit, which FLAC files usually exceed.
+- Keep your session string private. It provides account access; do not commit `.env` or session strings to public repositories.
+- You can use a secondary Telegram account for the channel library or terminate the session anytime under Telegram Settings > Devices.
 
 ---
 
-## Step 2: Authenticate & Generate Session String
+## 1. Get Telegram API credentials
 
-In this project folder, run:
+1. Log in to [my.telegram.org](https://my.telegram.org) with your phone number.
+2. Open **API development tools**.
+3. Create an application (the title and short name can be anything).
+4. Note your `api_id` and `api_hash`.
+
+---
+
+## 2. Authenticate and create session string
+
+Run the login script:
 
 ```bash
 npm run login
 ```
 
-The interactive prompt will:
-1. Ask for your `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` (if not already in `.env`).
-2. Ask for your phone number (international format, e.g. `+1234567890` or `+919876543210`).
-3. Ask for the login code Telegram sends to your app.
-4. Ask for your 2FA password (press Enter if you don't have one).
-5. Prompt for your Telegram Music Channel name or ID.
-6. **Automatically generate and save all credentials to `.env`!**
+Follow the prompts to enter:
+1. `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` (if not set in `.env`)
+2. Phone number in international format (such as `+1234567890` or `+919876543210`)
+3. Telegram confirmation code
+4. Two-step verification password, if enabled
+5. Telegram channel handle or ID
+
+The script writes the resulting credentials to `.env`.
 
 ---
 
-## Step 3: Setting Up Your Music Channel
+## 3. Set up the Telegram channel
 
-1. In Telegram, create a **Channel** (Private or Public).
-2. Get the channel identifier:
-   - **Public Channel**: Use your handle, e.g. `@my_lossless_vault`.
-   - **Private Channel**: Forward any message from your channel to `@userinfobot` or `@getidsbot` on Telegram to get your numeric ID (usually starts with `-100`, e.g. `-1001234567890`).
-3. **Uploading music**:
-   - Always upload tracks as **Files / Documents** (not compressed audio). Telegram will preserve exact bit-for-bit FLAC audio, embedded tags, and cover artwork!
-   - Newly uploaded songs are **automatically indexed in real time** without needing to restart the server.
+1. Create a channel in Telegram (private or public).
+2. Find the channel identifier:
+   - Public channel: Use the username (such as `@my_lossless_vault`).
+   - Private channel: Forward a message from the channel to `@userinfobot` or `@getidsbot` to get the numeric ID (prefixed with `-100`).
+3. Upload audio files:
+   - Upload audio as **Files / Documents** rather than compressed audio to preserve tags and uncompressed audio.
+   - The server indexes newly uploaded files as they arrive.
 
 ---
 
-## Step 4: Run Locally
+## 4. Run locally
 
 ```bash
 npm start
 ```
 
-You should see:
+Expected startup output:
 ```
 Connecting to Telegram MTProto...
 Connected to Telegram!
@@ -91,26 +92,27 @@ Indexing Telegram channel...
 Indexing complete! 25 track(s) ready in library.
 ```
 
-Test in your browser:
-- `http://localhost:3000/manifest.json` — Addon metadata
-- `http://localhost:3000/search` — List of indexed tracks
+Endpoints to verify in a browser:
+- `http://localhost:3000/manifest.json`: Addon manifest metadata
+- `http://localhost:3000/search`: Indexed tracks
 
 ---
 
-## Step 5: Expose via HTTPS for Android / BitChord
+## 5. Expose over HTTPS
 
-> [!IMPORTANT]
-> Android's ExoPlayer blocks plain `http://` streams by default. The addon URL must be **`https://`**.
+Android ExoPlayer requires HTTPS streams.
 
-You have two simple options:
+### Option A: Render / Fly.io
 
-### Option A: Cloud Deployment on Fly.io (Free, Always On)
-1. Install Fly CLI: `https://fly.io/docs/hands-on/install-flyctl/`
-2. Run in this directory:
+Deploy to a hosting service that provides HTTPS termination, such as Render or Fly.io.
+
+For Fly.io:
+1. Install the flyctl CLI.
+2. Launch the app configuration:
    ```bash
    fly launch --name my-telegram-music --no-deploy
    ```
-3. Set your secrets (from your `.env`):
+3. Set environment secrets:
    ```bash
    fly secrets set TELEGRAM_API_ID="your_api_id"
    fly secrets set TELEGRAM_API_HASH="your_api_hash"
@@ -121,29 +123,26 @@ You have two simple options:
    ```bash
    fly deploy
    ```
-5. Your live HTTPS URL will be: `https://my-telegram-music.fly.dev`
 
-### Option B: Quick Local Testing via Cloudflare Tunnel
-If running on your PC without cloud deploy:
-1. Download [cloudflared](https://github.com/cloudflare/cloudflared/releases).
-2. Run:
+### Option B: Cloudflare Tunnel for local testing
+
+1. Install `cloudflared`.
+2. Start the tunnel:
    ```bash
    cloudflared tunnel --url http://localhost:3000
    ```
-3. Copy the generated `https://xxxx.trycloudflare.com` URL.
+3. Copy the assigned `https://...trycloudflare.com` URL.
 
 ---
 
-## Step 6: Add to BitChord Android App
+## 6. Connect BitChord
 
-1. Open **BitChord** on your Android device.
-2. Tap **Settings** (gear icon) → **Sources**.
-3. Under Addons / Pluggable Sources, tap **Add Source** (or the `+` button).
-4. Paste your addon URL:
+1. Open **BitChord** on Android.
+2. Go to **Settings** > **Sources**.
+3. Select **Add Source** under pluggable sources.
+4. Enter your addon base URL:
    ```
    https://my-telegram-music.fly.dev
    ```
-5. BitChord will automatically probe `/manifest.json`, verify the connection, and show a green checkmark!
-6. Now, whenever you play a song, BitChord checks your Telegram lossless library first:
-   - If available: Streams high-fidelity FLAC/ALAC directly from Telegram with the **Lossless / Hi-Res** badge!
-   - If not in your channel: Falls back seamlessly to YouTube Music audio!
+5. BitChord validates `/manifest.json`.
+6. When playing a song, BitChord queries your Telegram library first. If a match is found, it plays the Telegram audio stream; otherwise, it falls back to YouTube Music.

@@ -15,12 +15,36 @@ const app = express();
 app.set('trust proxy', true);
 app.use(cors());
 
-const API_ID = parseInt(process.env.TELEGRAM_API_ID, 10);
-const API_HASH = process.env.TELEGRAM_API_HASH;
-const SESSION_STRING = process.env.TELEGRAM_SESSION_STRING;
-const CHANNEL = process.env.TELEGRAM_CHANNEL; // e.g. "@mychannel", numeric ID -100..., or channel title
+function cleanEnv(val) {
+  if (!val) return '';
+  let s = String(val).trim();
+  // Strip any wrapping quotes
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+const API_ID = parseInt(cleanEnv(process.env.TELEGRAM_API_ID), 10);
+const API_HASH = cleanEnv(process.env.TELEGRAM_API_HASH);
+let SESSION_STRING = cleanEnv(process.env.TELEGRAM_SESSION_STRING);
+const CHANNEL = cleanEnv(process.env.TELEGRAM_CHANNEL);
 const PORT = process.env.PORT || 3000;
 const CACHE_FILE = path.join(__dirname, 'tracks_cache.json');
+
+// GramJS StringSession requires the session to start with version "1"
+if (SESSION_STRING && SESSION_STRING[0] !== '1') {
+  if (SESSION_STRING.startsWith('BQANOT')) {
+    console.log("[AutoFix] Adding missing leading '1' to TELEGRAM_SESSION_STRING");
+    SESSION_STRING = '1' + SESSION_STRING;
+  } else {
+    const oneIdx = SESSION_STRING.indexOf('1');
+    if (oneIdx !== -1) {
+      console.log(`[AutoFix] Trimming leading characters before '1' in session string`);
+      SESSION_STRING = SESSION_STRING.slice(oneIdx);
+    }
+  }
+}
 
 if (!API_ID || !API_HASH || !SESSION_STRING || !CHANNEL) {
   console.error('----------------------------------------------------------------');

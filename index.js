@@ -593,7 +593,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music Addon',
-    version: '1.9.0',
+    version: '1.9.1',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -906,18 +906,29 @@ app.get('/audio/:id', async (req, res) => {
 
     let start = 0;
     let end = totalSize - 1;
+    let isRange = false;
 
     const range = req.headers.range;
     if (range) {
-      const match = range.match(/bytes=(\d+)-(\d*)/);
+      const match = range.match(/bytes=(\d*)-(\d*)/);
       if (match) {
-        start = parseInt(match[1], 10) || 0;
-        if (match[2] && match[2].trim()) {
-          end = parseInt(match[2], 10);
-        } else {
+        if (match[1] === '' && match[2] !== '') {
+          // Suffix range: bytes=-500 (request last 500 bytes)
+          const suffix = parseInt(match[2], 10);
+          start = Math.max(0, totalSize - suffix);
           end = totalSize - 1;
+          isRange = true;
+        } else if (match[1] !== '') {
+          start = parseInt(match[1], 10);
+          end = match[2] !== '' ? parseInt(match[2], 10) : totalSize - 1;
+          isRange = true;
         }
       }
+    }
+
+    if (isRange && (start >= totalSize || start > end)) {
+      res.setHeader('Content-Range', `bytes */${totalSize}`);
+      return res.status(416).end();
     }
 
     // Strictly clamp boundaries to valid byte positions
@@ -935,22 +946,32 @@ app.get('/audio/:id', async (req, res) => {
       track: `${track.title} - ${track.artist}`,
     });
 
-    res.status(range ? 206 : 200);
+    res.status(isRange ? 206 : 200);
     res.setHeader('Content-Type', track.mimeType || (track.format === 'flac' ? 'audio/flac' : 'application/octet-stream'));
     res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Keep-Alive', 'timeout=30, max=100');
     res.setHeader('Content-Length', bytesNeeded);
-    if (range) {
+    if (isRange) {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
     }
 
+    // Dynamic MTProto block size:
+    // For small probes (<= 128KB), use 64KB/128KB to respond in sub-100ms without socket congestion.
+    // For normal/large streaming, use 512KB for maximum line-rate throughput.
+    // Must be a multiple of 4096 (MIN_CHUNK_SIZE) between 64KB and 512KB.
+    const dynamicBlockSize = Math.min(
+      512 * 1024,
+      Math.max(64 * 1024, Math.ceil(bytesNeeded / 4096) * 4096)
+    );
+
     // Stream directly from Telegram MTProto from the requested byte offset.
-    // Single clean connection — no background tasks competing for MTProto bandwidth.
     let bytesSent = 0;
 
     iterator = client.iterDownload({
       file: media,
       offset: bigInt(start),
-      requestSize: 512 * 1024, // 512KB blocks (up from 256KB in v1.8.0 — halves round-trips)
+      requestSize: dynamicBlockSize,
     });
 
     for await (const chunk of iterator) {
@@ -1055,7 +1076,7 @@ app.get('/debug/faststart', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.9.0',
+    version: '1.9.1',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,

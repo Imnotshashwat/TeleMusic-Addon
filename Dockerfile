@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 
-COPY index.js tracks_cache.json* ./
+COPY . .
 
 EXPOSE 3000
 

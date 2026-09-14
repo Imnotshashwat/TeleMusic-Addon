@@ -536,7 +536,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.3.0',
+    version: '1.4.0',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -853,6 +853,7 @@ app.get('/refresh', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
+    version: '1.4.0',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,

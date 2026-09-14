@@ -536,7 +536,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.4.0',
+    version: '1.4.1',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -596,7 +596,11 @@ function matchTrack(t, query) {
 
   // 4. Token similarity: at least 60% of search terms match track tokens
   const matchCount = terms.filter((term) => {
-    return Array.from(allWords).some((w) => w.includes(term) || term.includes(w));
+    return Array.from(allWords).some((w) => {
+      if (w === term) return true;
+      if (w.length >= 4 && term.length >= 4 && (w.startsWith(term) || term.startsWith(w))) return true;
+      return false;
+    });
   }).length;
 
   return (matchCount / terms.length) >= 0.6;
@@ -853,7 +857,7 @@ app.get('/refresh', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.4.0',
+    version: '1.4.1',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,

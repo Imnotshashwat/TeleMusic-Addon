@@ -10,6 +10,7 @@ const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const { NewMessage } = require('telegram/events');
 const mm = require('music-metadata');
+const { handleSongCommand } = require('./downloader');
 
 const app = express();
 app.set('trust proxy', true);
@@ -199,7 +200,8 @@ async function parseTrackMessage(msg) {
   let isrc = undefined;
 
   // Try to inspect the first 128KB for lossless FLAC/ALAC/WAV tags or missing title/performer
-  const shouldSniffTags = resolvedExt === 'flac' || resolvedExt === 'alac' || resolvedExt === 'wav' || !audioAttr || !audioAttr.title;
+  const shouldSniffTags = resolvedExt === 'flac' || resolvedExt === 'alac' || resolvedExt === 'wav' || resolvedExt === 'm4a' || !audioAttr || !audioAttr.title;
+  let parsedCodec = null;
   if (shouldSniffTags && sizeBytes > 0) {
     try {
       const headerBuf = await getHeaderChunk(msg.media, Math.min(128 * 1024, sizeBytes));
@@ -219,6 +221,7 @@ async function parseTrackMessage(msg) {
           if (parsed.common.isrc && parsed.common.isrc.length > 0) isrc = parsed.common.isrc[0];
         }
         if (parsed.format) {
+          parsedCodec = parsed.format.codec;
           if (parsed.format.sampleRate) sampleRate = parsed.format.sampleRate;
           if (parsed.format.bitsPerSample) bitDepth = parsed.format.bitsPerSample;
           if (!duration && parsed.format.duration) duration = Math.round(parsed.format.duration);
@@ -229,19 +232,27 @@ async function parseTrackMessage(msg) {
     }
   }
 
-  // Quality badge text (e.g. "24-bit / 96.0kHz FLAC" or "16-bit / 44.1kHz FLAC" or "MP3 (320kbps)")
-  const formatName = EXT_TO_FORMAT[resolvedExt] || resolvedExt;
+  // Quality badge text & format resolution
+  let formatName = EXT_TO_FORMAT[resolvedExt] || resolvedExt;
+  let rawKbps = 0;
+  if (sizeBytes && duration) {
+    rawKbps = Math.round((sizeBytes * 8) / (duration * 1000));
+  }
+
+  // Detect ALAC in .m4a containers (Apple Music delivers ALAC in .m4a)
+  if (formatName === 'm4a' && (parsedCodec === 'ALAC' || rawKbps > 500)) {
+    formatName = 'alac';
+    if (!bitDepth) bitDepth = rawKbps > 2000 ? 24 : 16;
+    if (!sampleRate) sampleRate = 48000;
+  }
+
   let qualityText = formatName.toUpperCase();
   if (bitDepth && sampleRate) {
-    qualityText = `${bitDepth}-bit / ${(sampleRate / 1000).toFixed(1)}kHz FLAC`;
+    qualityText = `${bitDepth}-bit / ${(sampleRate / 1000).toFixed(1)}kHz ${formatName.toUpperCase()}`;
   } else if (['flac', 'wav', 'alac'].includes(formatName)) {
-    qualityText = '16-bit / 44.1kHz FLAC Lossless';
+    qualityText = `16-bit / 44.1kHz ${formatName.toUpperCase()} Lossless`;
   } else {
-    let kbps = 320;
-    if (sizeBytes && duration) {
-      kbps = Math.round((sizeBytes * 8) / (duration * 1000));
-    }
-    qualityText = `${formatName.toUpperCase()} (${Math.min(kbps, 320)}kbps)`;
+    qualityText = `${formatName.toUpperCase()} (${Math.min(rawKbps || 320, 320)}kbps)`;
   }
 
   return {
@@ -826,26 +837,38 @@ async function resolveChannel() {
     channelEntity = await resolveChannel();
     console.log(`Using Telegram channel: ${channelEntity.title || channelEntity.username || CHANNEL}`);
 
-    // Set up real-time listener for new audio files uploaded to the channel
+    // Set up real-time listener for /song commands and new audio uploads
     client.addEventHandler(async (event) => {
       try {
         const message = event.message;
-        if (!message || !message.media || !message.media.document) return;
+        if (!message) return;
 
-        // Verify the message belongs to our configured music channel
-        if (channelEntity && message.peerId) {
-          const peerId = utils.getPeerId(message.peerId).toString();
-          const targetChanId = utils.getPeerId(channelEntity).toString();
-          if (peerId !== targetChanId) return;
+        const isMusicChannel = channelEntity && message.peerId && (utils.getPeerId(message.peerId).toString() === utils.getPeerId(channelEntity).toString());
+        const isSelfChat = message.isPrivate; // e.g. Saved Messages
+
+        // Check for /song command
+        if (message.text && message.text.trim().startsWith('/song')) {
+          if (isMusicChannel || isSelfChat) {
+            console.log(`[Song Command] Detected: "${message.text.trim()}" (msg ID: ${message.id})`);
+            handleSongCommand(client, channelEntity, message.text.trim(), message.id).catch((err) => {
+              console.error('[Song Command Error]:', err.message);
+            });
+            return;
+          }
         }
 
-        console.log(`Detected new upload in channel (msg ID: ${message.id}), processing track...`);
-        const track = await parseTrackMessage(message);
-        if (track) {
-          await processTrackUpload(track);
+        // Check for incoming audio file upload
+        if (message.media && message.media.document) {
+          if (!isMusicChannel) return;
+
+          console.log(`Detected new upload in channel (msg ID: ${message.id}), processing track...`);
+          const track = await parseTrackMessage(message);
+          if (track) {
+            await processTrackUpload(track);
+          }
         }
       } catch (err) {
-        console.warn('Real-time indexing error:', err.message);
+        console.warn('Real-time event error:', err.message);
       }
     }, new NewMessage({}));
 

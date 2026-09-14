@@ -1,6 +1,6 @@
 # TeleMusic Addon
 
-A BitChord music provider that streams lossless audio stored in a private Telegram channel.
+A [BitChord](https://github.com/kushagrasinghx/BitChord) music provider that streams lossless audio stored in a private Telegram channel.
 
 BitChord searches this server whenever a track is requested. If the track is present in your Telegram channel, BitChord streams the original FLAC/ALAC file directly to ExoPlayer. If not, it falls back to YouTube Music.
 

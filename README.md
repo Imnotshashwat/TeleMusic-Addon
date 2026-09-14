@@ -76,7 +76,7 @@ Set the following environment variables in your deployment dashboard:
 
 1. Open BitChord on your Android device.
 2. Navigate to **Settings** > **Sources**.
-3. Tap **Add Source** and paste your deployment URL (e.g. `https://your-app.onrender.com`).
+3. Tap **Add Source** and paste your deployment URL (e.g. `https://<your-service-name>.onrender.com`).
 4. BitChord validates the manifest. When you play tracks, BitChord will check your Telegram channel first.
 
 ## API Endpoints

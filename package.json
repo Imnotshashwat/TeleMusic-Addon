@@ -1,0 +1,23 @@
+{
+  "name": "telegram-eclipse-addon",
+  "version": "1.0.0",
+  "description": "Personal Eclipse Music addon that streams lossless/hi-res tracks from a Telegram channel",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "login": "node login.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "big-integer": "^1.6.52",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "input": "^1.0.1",
+    "music-metadata": "^7.14.0",
+    "telegram": "^2.24.11"
+  }
+}

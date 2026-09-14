@@ -1,0 +1,17 @@
+# Replace "my-telegram-music" with your own app name (must be globally unique on Fly.io).
+# Run: fly launch --name my-telegram-music
+app = "my-telegram-music"
+primary_region = "ams"  # Amsterdam (same datacenter region as Telegram DC4 for lowest seek latency)
+
+[build]
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

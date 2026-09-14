@@ -564,6 +564,70 @@ app.get('/deduplicate', async (req, res) => {
   }
 });
 
+const SEARCH_STOP_WORDS = new Set([
+  'by', 'the', 'a', 'an', 'and', 'or', 'feat', 'ft', 'featuring',
+  'song', 'audio', 'video', 'official', 'full', 'mp3', 'flac'
+]);
+
+function matchTrack(t, query) {
+  if (!query) return true;
+  const qNorm = query.toLowerCase().trim();
+  const fullText = `${t.title} ${t.artist} ${t.album || ''}`.toLowerCase();
+
+  // 1. Direct substring check (fast path)
+  if (fullText.includes(qNorm)) return true;
+
+  // 2. Tokenize without punctuation & stop words
+  const terms = qNorm.replace(/[^\w\s]/g, ' ').split(/\s+/).filter((w) => w.length > 0 && !SEARCH_STOP_WORDS.has(w));
+  if (terms.length === 0) return true;
+
+  const titleWords = t.title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const artistWords = t.artist.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const allWords = new Set([...titleWords, ...artistWords, ...(t.album || '').toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/)]);
+
+  // 3. Title match: all title words present in query
+  const titleMatched = titleWords.length > 0 && titleWords.every((tw) => terms.includes(tw));
+  if (titleMatched) {
+    const hasArtistWord = artistWords.some((aw) => terms.includes(aw));
+    if (hasArtistWord || terms.length <= titleWords.length) {
+      return true;
+    }
+  }
+
+  // 4. Token similarity: at least 60% of search terms match track tokens
+  const matchCount = terms.filter((term) => {
+    return Array.from(allWords).some((w) => w.includes(term) || term.includes(w));
+  }).length;
+
+  return (matchCount / terms.length) >= 0.6;
+}
+
+// In-memory cooldown registry to prevent spamming duplicate background downloads
+const autoDownloadCooldown = new Map();
+
+function triggerBackgroundAutoDownload(query) {
+  if (!client || !channelEntity) return;
+  const qClean = query.trim().replace(/\s+/g, ' ');
+  if (qClean.length < 3) return;
+
+  const key = qClean.toLowerCase();
+  const now = Date.now();
+  const lastTime = autoDownloadCooldown.get(key) || 0;
+
+  // 5-minute cooldown per query
+  if (now - lastTime < 5 * 60 * 1000) {
+    return;
+  }
+
+  autoDownloadCooldown.set(key, now);
+  console.log(`[AutoDownloader] Triggering background lossless download for "${qClean}"...`);
+
+  // Fire and forget without blocking BitChord search response
+  handleSongCommand(client, channelEntity, `/song ${qClean}`).catch((err) => {
+    console.warn(`[AutoDownloader] Background download failed for "${qClean}":`, err.message);
+  });
+}
+
 // Search: BitChord calls /search?q=... to find tracks
 app.get('/search', async (req, res) => {
   try {
@@ -577,12 +641,12 @@ app.get('/search', async (req, res) => {
 
     let matches = trackIndex;
     if (q) {
-      // Split query into terms (e.g. "blinding lights the weeknd" -> ["blinding", "lights", "the", "weeknd"])
-      const terms = q.split(/\s+/).filter(Boolean);
-      matches = trackIndex.filter((t) => {
-        const fullText = `${t.title} ${t.artist} ${t.album || ''}`.toLowerCase();
-        return terms.every((term) => fullText.includes(term));
-      });
+      matches = trackIndex.filter((t) => matchTrack(t, q));
+
+      // If track is not found in Telegram, trigger background lossless auto-download!
+      if (matches.length === 0) {
+        triggerBackgroundAutoDownload(q);
+      }
     }
 
     res.json({

@@ -536,7 +536,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.5.0',
+    version: '1.6.0',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -606,9 +606,6 @@ function matchTrack(t, query) {
   return (matchCount / terms.length) >= 0.6;
 }
 
-// In-memory cooldown registry to prevent spamming duplicate background downloads
-const autoDownloadCooldown = new Map();
-
 async function onTrackForwarded(msg) {
   try {
     const track = await parseTrackMessage(msg);
@@ -619,29 +616,6 @@ async function onTrackForwarded(msg) {
   } catch (err) {
     console.warn('[AutoIndex] Error indexing forwarded track:', err.message);
   }
-}
-
-function triggerBackgroundAutoDownload(query) {
-  if (!client || !channelEntity) return;
-  const qClean = query.trim().replace(/\s+/g, ' ');
-  if (qClean.length < 3) return;
-
-  const key = qClean.toLowerCase();
-  const now = Date.now();
-  const lastTime = autoDownloadCooldown.get(key) || 0;
-
-  // 5-minute cooldown per query
-  if (now - lastTime < 5 * 60 * 1000) {
-    return;
-  }
-
-  autoDownloadCooldown.set(key, now);
-  console.log(`[AutoDownloader] Triggering background lossless download for "${qClean}"...`);
-
-  // Fire and forget without blocking BitChord search response
-  handleSongCommand(client, channelEntity, `/song ${qClean}`, null, onTrackForwarded).catch((err) => {
-    console.warn(`[AutoDownloader] Background download failed for "${qClean}":`, err.message);
-  });
 }
 
 // Search: BitChord calls /search?q=... to find tracks
@@ -678,11 +652,6 @@ app.get('/search', async (req, res) => {
             matches = trackIndex.filter((t) => matchTrack(t, q));
           }
         } catch (_) {}
-      }
-
-      // If still not found in Telegram, trigger background lossless auto-download!
-      if (matches.length === 0) {
-        triggerBackgroundAutoDownload(q);
       }
     }
 
@@ -890,7 +859,7 @@ app.get('/refresh', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.5.0',
+    version: '1.6.0',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,

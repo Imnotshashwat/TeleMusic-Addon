@@ -2,7 +2,7 @@
 
 Self-hosted [BitChord](https://github.com/kushagrasinghx/BitChord) addon for streaming personal FLAC and hi-res audio from Telegram using GramJS and Express. Built for personal use.
 
-BitChord searches this server whenever a track is requested. If the track is present in your Telegram channel, BitChord streams the original FLAC/ALAC file directly to ExoPlayer. If not, it falls back to YouTube Music.
+BitChord searches this server whenever a track is requested. If the track is present in your Telegram channel, BitChord streams the original FLAC/ALAC file directly to ExoPlayer. If not, it falls back to Jio Saavan/YouTube Music.
 
 ## Features
 

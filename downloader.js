@@ -171,7 +171,7 @@ async function downloadFromMusicsHunters(client, queryOrUrl, optionNum = 1, onPr
 /**
  * Handles `/song ...` channel command.
  */
-async function handleSongCommand(client, channelEntity, commandText, originalMsgId = null) {
+async function handleSongCommand(client, channelEntity, commandText, originalMsgId = null, onTrackForwarded = null) {
   const text = commandText.trim();
   const match = text.match(/^\/song(?:\s+(.+))?$/i);
   if (!match || !match[1]) {
@@ -260,10 +260,18 @@ async function handleSongCommand(client, channelEntity, commandText, originalMsg
     // Forward the audio document to the music library channel
     await updateStatus(`🚀 Uploading track to Music Library...`);
     const botPeer = audioDocMsg.peerId;
-    await client.forwardMessages(channelEntity, {
+    const forwarded = await client.forwardMessages(channelEntity, {
       messages: [audioDocMsg.id],
       fromPeer: botPeer,
     });
+
+    if (onTrackForwarded && forwarded && forwarded[0]) {
+      try {
+        await onTrackForwarded(forwarded[0]);
+      } catch (idxErr) {
+        console.warn('[Downloader] Post-forward indexing error:', idxErr.message);
+      }
+    }
 
     await updateStatus(`✅ **Added to Music Library!**`);
 

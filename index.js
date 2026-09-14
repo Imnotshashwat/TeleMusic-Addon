@@ -536,7 +536,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.4.1',
+    version: '1.5.0',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -609,6 +609,18 @@ function matchTrack(t, query) {
 // In-memory cooldown registry to prevent spamming duplicate background downloads
 const autoDownloadCooldown = new Map();
 
+async function onTrackForwarded(msg) {
+  try {
+    const track = await parseTrackMessage(msg);
+    if (track) {
+      await processTrackUpload(track);
+      console.log(`[AutoIndex] Successfully indexed newly uploaded track: "${track.title}" (ID: ${track.id})`);
+    }
+  } catch (err) {
+    console.warn('[AutoIndex] Error indexing forwarded track:', err.message);
+  }
+}
+
 function triggerBackgroundAutoDownload(query) {
   if (!client || !channelEntity) return;
   const qClean = query.trim().replace(/\s+/g, ' ');
@@ -627,7 +639,7 @@ function triggerBackgroundAutoDownload(query) {
   console.log(`[AutoDownloader] Triggering background lossless download for "${qClean}"...`);
 
   // Fire and forget without blocking BitChord search response
-  handleSongCommand(client, channelEntity, `/song ${qClean}`).catch((err) => {
+  handleSongCommand(client, channelEntity, `/song ${qClean}`, null, onTrackForwarded).catch((err) => {
     console.warn(`[AutoDownloader] Background download failed for "${qClean}":`, err.message);
   });
 }
@@ -647,7 +659,28 @@ app.get('/search', async (req, res) => {
     if (q) {
       matches = trackIndex.filter((t) => matchTrack(t, q));
 
-      // If track is not found in Telegram, trigger background lossless auto-download!
+      // If track is not found in memory index, quick-sync the latest 10 channel messages
+      // to immediately catch any newly forwarded/uploaded songs!
+      if (matches.length === 0 && channelEntity) {
+        try {
+          const recentMsgs = await client.getMessages(channelEntity, { limit: 10 });
+          let foundNew = false;
+          for (const m of recentMsgs) {
+            if (m.media && m.media.document && !trackIndex.some((t) => t.id === String(m.id))) {
+              const t = await parseTrackMessage(m);
+              if (t) {
+                await processTrackUpload(t);
+                foundNew = true;
+              }
+            }
+          }
+          if (foundNew) {
+            matches = trackIndex.filter((t) => matchTrack(t, q));
+          }
+        } catch (_) {}
+      }
+
+      // If still not found in Telegram, trigger background lossless auto-download!
       if (matches.length === 0) {
         triggerBackgroundAutoDownload(q);
       }
@@ -857,7 +890,7 @@ app.get('/refresh', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.4.1',
+    version: '1.5.0',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,
@@ -919,7 +952,7 @@ async function resolveChannel() {
         if (message.text && message.text.trim().startsWith('/song')) {
           if (isMusicChannel || isSelfChat) {
             console.log(`[Song Command] Detected: "${message.text.trim()}" (msg ID: ${message.id})`);
-            handleSongCommand(client, channelEntity, message.text.trim(), message.id).catch((err) => {
+            handleSongCommand(client, channelEntity, message.text.trim(), message.id, onTrackForwarded).catch((err) => {
               console.error('[Song Command Error]:', err.message);
             });
             return;

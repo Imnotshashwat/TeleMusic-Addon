@@ -949,46 +949,107 @@ app.get('/audio/:id', async (req, res) => {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
     }
 
-    // ── Fast-Start: serve initial audio preamble from RAM ───────────────────
-    // If this is a play-from-start request (start === 0) and we have the first
-    // FAST_START_BYTES cached in RAM, send those bytes instantly (<100ms) so
-    // ExoPlayer can start the audio decoder immediately. The remaining bytes
-    // are then streamed live from Telegram MTProto seamlessly.
+    // ── Fast-Start: RAM preamble + parallel Telegram pipeline ────────────────
+    // Strategy: kick off the live Telegram MTProto download IMMEDIATELY in the
+    // background, then flush the cached 512KB preamble from RAM right away.
+    // By the time the preamble bytes finish sending (~100ms), the first live
+    // Telegram chunk is already arriving — zero gap, zero rebuffering stall.
     let bytesSent = 0;
     const cachedPreamble = fastStartCache.get(req.params.id);
     const useFastStart = (start === 0) && cachedPreamble && cachedPreamble.length > 0;
 
+    // Shared async chunk queue for pipelining preamble → live stream
+    const liveChunks = [];
+    let liveStreamDone = false;
+    let liveStreamError = null;
+    let liveResolve = null; // notified when a new live chunk arrives
+
     if (useFastStart) {
-      // How many bytes of the cached preamble does this request actually need?
-      const preambleNeeded = Math.min(cachedPreamble.length, bytesNeeded);
-      const preambleSlice = cachedPreamble.slice(0, preambleNeeded);
+      // 1. Start Telegram download immediately in background (do NOT await)
+      const liveStartOffset = cachedPreamble.length; // byte after preamble
+      iterator = client.iterDownload({
+        file: media,
+        offset: bigInt(liveStartOffset),
+        requestSize: 512 * 1024,
+      });
 
-      if (isConnectionClosed || res.destroyed) {
-        return;
+      // Pull live chunks into the queue without blocking preamble flush
+      (async () => {
+        try {
+          for await (const chunk of iterator) {
+            if (isConnectionClosed || res.destroyed) break;
+            liveChunks.push(chunk);
+            if (liveResolve) { const r = liveResolve; liveResolve = null; r(); }
+          }
+        } catch (e) {
+          liveStreamError = e;
+          if (liveResolve) { const r = liveResolve; liveResolve = null; r(); }
+        } finally {
+          liveStreamDone = true;
+          if (liveResolve) { const r = liveResolve; liveResolve = null; r(); }
+        }
+      })();
+
+      // 2. Flush preamble from RAM instantly (<100ms)
+      if (!isConnectionClosed && !res.destroyed) {
+        const preambleSlice = cachedPreamble.slice(0, Math.min(cachedPreamble.length, bytesNeeded));
+        const canContinue = res.write(preambleSlice);
+        bytesSent += preambleSlice.length;
+
+        if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
+          await new Promise((resolve) => {
+            const onDrain = () => { req.removeListener('close', onClose); resolve(); };
+            const onClose = () => { res.removeListener('drain', onDrain); resolve(); };
+            res.once('drain', onDrain);
+            req.once('close', onClose);
+          });
+        }
       }
 
-      // Flush the preamble to the client instantly from RAM
-      const canContinue = res.write(preambleSlice);
-      bytesSent += preambleSlice.length;
+      // 3. Stream live chunks from queue (already downloading in background)
+      while (bytesSent < bytesNeeded && !isConnectionClosed && !res.writableEnded && !res.destroyed) {
+        // Wait for a live chunk if queue is empty and stream isn't done
+        while (liveChunks.length === 0 && !liveStreamDone && !isConnectionClosed) {
+          await new Promise((resolve) => { liveResolve = resolve; });
+        }
+        if (liveStreamError) throw liveStreamError;
+        if (liveChunks.length === 0) break;
 
-      if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
-        await new Promise((resolve) => {
-          const onDrain = () => { req.removeListener('close', onClose); resolve(); };
-          const onClose = () => { res.removeListener('drain', onDrain); resolve(); };
-          res.once('drain', onDrain);
-          req.once('close', onClose);
-        });
+        let chunk = liveChunks.shift();
+        let toSend = chunk;
+        let shouldBreak = false;
+
+        if (bytesSent + chunk.length > bytesNeeded) {
+          toSend = chunk.slice(0, bytesNeeded - bytesSent);
+          shouldBreak = true;
+        }
+
+        bytesSent += toSend.length;
+        if (bytesSent >= bytesNeeded) shouldBreak = true;
+
+        const canContinue = res.write(toSend);
+        if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
+          await new Promise((resolve) => {
+            const onDrain = () => { req.removeListener('close', onClose); resolve(); };
+            const onClose = () => { res.removeListener('drain', onDrain); resolve(); };
+            res.once('drain', onDrain);
+            req.once('close', onClose);
+          });
+        }
+
+        if (shouldBreak || isConnectionClosed) break;
       }
-    }
 
-    // ── Live MTProto Stream: remainder after the fast-start preamble ─────────
-    // Stream using 512KB MTProto blocks (up from 256KB) — halves round-trips.
+    } else {
+
+    // ── Fallback: no cache — stream live from Telegram from offset ────────────
+    // (also handles seek requests where start > 0)
     const liveOffset = start + bytesSent;
     if (bytesSent < bytesNeeded && !isConnectionClosed) {
       iterator = client.iterDownload({
         file: media,
         offset: bigInt(liveOffset),
-        requestSize: 512 * 1024, // 512KB blocks — max MTProto DC supports
+        requestSize: 512 * 1024,
       });
 
       for await (const chunk of iterator) {
@@ -1011,7 +1072,6 @@ app.get('/audio/:id', async (req, res) => {
           shouldBreak = true;
         }
 
-        // Handle backpressure: pause pulling chunks if client network buffer is full
         const canContinue = res.write(toSend);
         if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
           await new Promise((resolve) => {
@@ -1035,6 +1095,7 @@ app.get('/audio/:id', async (req, res) => {
         }
       }
     }
+    } // end else (fallback block)
 
     if (!res.writableEnded && !isConnectionClosed) {
       res.end();

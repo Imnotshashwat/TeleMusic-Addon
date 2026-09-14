@@ -82,6 +82,13 @@ let lastIndexed = 0;
 // Eliminates the redundant 1-2 second client.getMessages() round-trip on every seek
 const mediaCache = new Map();
 
+// In-memory request log ring buffer (keeps last 50 requests for production debugging)
+const recentRequests = [];
+function recordRequest(entry) {
+  recentRequests.unshift(entry);
+  if (recentRequests.length > 50) recentRequests.pop();
+}
+
 // Helper: load cached tracks from disk
 function loadCache() {
   try {
@@ -505,6 +512,9 @@ async function buildTrackIndex() {
       // Check if we already have this message ID cached with full details
       const existing = trackIndex.find((t) => t.id === String(msg.id));
       if (existing) {
+        if (!existing.sizeBytes && msg.media?.document?.size) {
+          existing.sizeBytes = Number(msg.media.document.size);
+        }
         newIndex.push(existing);
         continue;
       }
@@ -536,7 +546,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.7.0',
+    version: '1.8.0',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -651,8 +661,9 @@ function scoreTrackMatch(track, query) {
     if (trackAlbum && trackAlbum.includes(extraWords)) {
       return 120;
     }
-    // Title matched, but extra words were completely wrong artist!
-    return 0;
+    // Title matched, but extra words are present (e.g. composer, record label, video tags).
+    // Return 85 so BitChord receives the candidate and its client-side TrackMatcher validates duration/artist.
+    return 85;
   }
 
   // 3. Token-based fallback matching
@@ -693,6 +704,7 @@ async function onTrackForwarded(msg) {
 
 // Search: BitChord calls /search?q=... to find tracks (100% in-memory for instant < 5ms response!)
 app.get('/search', async (req, res) => {
+  const startTime = Date.now();
   try {
     // Refresh index periodically in background (every 30 minutes)
     if (Date.now() - lastIndexed > 30 * 60 * 1000) {
@@ -710,6 +722,17 @@ app.get('/search', async (req, res) => {
         .sort((a, b) => b.score - a.score)
         .map((item) => item.track);
     }
+
+    const elapsed = Date.now() - startTime;
+    recordRequest({
+      timestamp: new Date().toISOString(),
+      type: 'search',
+      query: req.query.q || '',
+      tier: req.query.quality || 'NONE',
+      resultsCount: matches.length,
+      topResult: matches[0] ? `${matches[0].title} - ${matches[0].artist} (${matches[0].duration}s)` : null,
+      elapsedMs: elapsed,
+    });
 
     res.json({
       tracks: matches.slice(0, 60).map((t) => ({
@@ -736,6 +759,15 @@ app.get('/search', async (req, res) => {
 app.get('/stream/:id', (req, res) => {
   const track = findTrack(req.params.id);
   const base = getBaseUrl(req);
+
+  recordRequest({
+    timestamp: new Date().toISOString(),
+    type: 'stream',
+    id: req.params.id,
+    track: track ? `${track.title} - ${track.artist}` : 'NOT_FOUND',
+    quality: track ? track.quality : 'UNKNOWN',
+    tier: req.query.quality || 'NONE',
+  });
 
   res.json({
     url: `${base}/audio/${req.params.id}`,
@@ -791,6 +823,7 @@ app.get('/artwork/:id', async (req, res) => {
 // Audio streaming: BitChord streams audio bytes with HTTP 206 Range support,
 // instant seeking via in-memory media caching, backpressure control, and immediate abort on client skip/seek.
 app.get('/audio/:id', async (req, res) => {
+  const reqStart = Date.now();
   let isConnectionClosed = false;
   let iterator = null;
 
@@ -814,7 +847,16 @@ app.get('/audio/:id', async (req, res) => {
 
     if (isConnectionClosed) return;
 
-    const totalSize = track.sizeBytes;
+    // Bulletproof totalSize: fallback to media.document.size, never allow NaN
+    const totalSize = Number(track.sizeBytes) || Number(media.document?.size) || 0;
+    if (!totalSize || isNaN(totalSize)) {
+      console.error(`Invalid totalSize for track ${req.params.id}`);
+      return res.status(500).send('Unable to determine audio file size');
+    }
+    if (!track.sizeBytes) {
+      track.sizeBytes = totalSize;
+    }
+
     let start = 0;
     let end = totalSize - 1;
 
@@ -822,15 +864,34 @@ app.get('/audio/:id', async (req, res) => {
     if (range) {
       const match = range.match(/bytes=(\d+)-(\d*)/);
       if (match) {
-        start = parseInt(match[1], 10);
-        end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
+        start = parseInt(match[1], 10) || 0;
+        if (match[2] && match[2].trim()) {
+          end = parseInt(match[2], 10);
+        } else {
+          end = totalSize - 1;
+        }
       }
     }
 
+    // Strictly clamp boundaries to valid byte positions
+    start = Math.max(0, Math.min(start, totalSize - 1));
+    end = Math.max(start, Math.min(end, totalSize - 1));
+    const bytesNeeded = end - start + 1;
+
+    recordRequest({
+      timestamp: new Date().toISOString(),
+      type: 'audio',
+      id: req.params.id,
+      range: range || 'none',
+      bytes: `${start}-${end}/${totalSize}`,
+      bytesNeeded,
+      track: `${track.title} - ${track.artist}`,
+    });
+
     res.status(range ? 206 : 200);
-    res.setHeader('Content-Type', track.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Type', track.mimeType || (track.format === 'flac' ? 'audio/flac' : 'application/octet-stream'));
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Length', end - start + 1);
+    res.setHeader('Content-Length', bytesNeeded);
     if (range) {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
     }
@@ -843,12 +904,11 @@ app.get('/audio/:id', async (req, res) => {
     });
 
     let bytesSent = 0;
-    const bytesNeeded = end - start + 1;
 
     for await (const chunk of iterator) {
       if (isConnectionClosed || res.writableEnded || res.destroyed) {
         iterator.left = 0;
-        await iterator.close();
+        await iterator.close().catch(() => {});
         break;
       }
 
@@ -884,7 +944,7 @@ app.get('/audio/:id', async (req, res) => {
 
       if (shouldBreak || isConnectionClosed) {
         iterator.left = 0;
-        await iterator.close();
+        await iterator.close().catch(() => {});
         break;
       }
     }
@@ -911,11 +971,26 @@ app.get('/refresh', async (req, res) => {
   }
 });
 
+// Lightweight ping for uptime monitors / keep-alive pingers
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
+
+// Live debug endpoint: returns the last 50 incoming requests and their responses
+app.get('/debug/requests', (req, res) => {
+  res.json({
+    status: 'ok',
+    totalTrackCount: trackIndex.length,
+    recordedRequestsCount: recentRequests.length,
+    requests: recentRequests,
+  });
+});
+
 // Status / Health endpoint
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.7.0',
+    version: '1.8.0',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,

@@ -7,8 +7,9 @@
     "duration": 232,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 32025305,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "154",
@@ -18,8 +19,9 @@
     "duration": 194,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 24945467,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "153",
@@ -29,8 +31,9 @@
     "duration": 199,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 28059229,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "152",
@@ -40,8 +43,9 @@
     "duration": 193,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 24343553,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "151",
@@ -51,8 +55,9 @@
     "duration": 236,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 28338965,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "150",
@@ -62,8 +67,9 @@
     "duration": 256,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 29268979,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "149",
@@ -73,8 +79,9 @@
     "duration": 352,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 36698261,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "148",
@@ -84,8 +91,9 @@
     "duration": 308,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 39130444,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "147",
@@ -95,8 +103,11 @@
     "duration": 302,
     "format": "flac",
     "quality": "24-bit / 88.2kHz FLAC",
+    "sizeBytes": 103216474,
+    "sampleRate": 88200,
+    "bitDepth": 24,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "146",
@@ -106,8 +117,9 @@
     "duration": 289,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 37454823,
     "hasArtwork": true,
-    "mimeType": "audio/x-flac"
+    "mimeType": "audio/flac"
   },
   {
     "id": "145",
@@ -117,6 +129,9 @@
     "duration": 222,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 30949193,
+    "sampleRate": 44100,
+    "bitDepth": 16,
     "hasArtwork": true,
     "mimeType": "audio/x-flac"
   },
@@ -128,6 +143,9 @@
     "duration": 261,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 27795907,
+    "sampleRate": 44100,
+    "bitDepth": 16,
     "hasArtwork": true,
     "mimeType": "audio/x-flac"
   },
@@ -139,6 +157,9 @@
     "duration": 268,
     "format": "alac",
     "quality": "24-bit / 48.0kHz ALAC",
+    "sizeBytes": 102665024,
+    "sampleRate": 48000,
+    "bitDepth": 24,
     "hasArtwork": false,
     "mimeType": "audio/mp4"
   },
@@ -150,6 +171,9 @@
     "duration": 211,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 23427216,
+    "sampleRate": 44100,
+    "bitDepth": 16,
     "hasArtwork": true,
     "mimeType": "audio/x-flac"
   },
@@ -161,6 +185,9 @@
     "duration": 254,
     "format": "flac",
     "quality": "16-bit / 44.1kHz FLAC",
+    "sizeBytes": 30340290,
+    "sampleRate": 44100,
+    "bitDepth": 16,
     "hasArtwork": true,
     "mimeType": "audio/x-flac"
   }

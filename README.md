@@ -1,4 +1,4 @@
-# TeleMusic Addon
+# Telegram Music Addon
 
 Self-hosted [BitChord](https://github.com/kushagrasinghx/BitChord) addon for streaming personal FLAC and hi-res audio from Telegram using GramJS and Express. Built for personal use.
 

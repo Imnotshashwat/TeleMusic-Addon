@@ -949,153 +949,59 @@ app.get('/audio/:id', async (req, res) => {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
     }
 
-    // ── Fast-Start: RAM preamble + parallel Telegram pipeline ────────────────
-    // Strategy: kick off the live Telegram MTProto download IMMEDIATELY in the
-    // background, then flush the cached 512KB preamble from RAM right away.
-    // By the time the preamble bytes finish sending (~100ms), the first live
-    // Telegram chunk is already arriving — zero gap, zero rebuffering stall.
+    // Stream directly from Telegram MTProto from the requested byte offset.
+    // Single clean connection — no background tasks competing for MTProto bandwidth.
     let bytesSent = 0;
-    const cachedPreamble = fastStartCache.get(req.params.id);
-    const useFastStart = (start === 0) && cachedPreamble && cachedPreamble.length > 0;
 
-    // Shared async chunk queue for pipelining preamble → live stream
-    const liveChunks = [];
-    let liveStreamDone = false;
-    let liveStreamError = null;
-    let liveResolve = null; // notified when a new live chunk arrives
+    iterator = client.iterDownload({
+      file: media,
+      offset: bigInt(start),
+      requestSize: 512 * 1024, // 512KB blocks (up from 256KB in v1.8.0 — halves round-trips)
+    });
 
-    if (useFastStart) {
-      // 1. Start Telegram download immediately in background (do NOT await)
-      const liveStartOffset = cachedPreamble.length; // byte after preamble
-      iterator = client.iterDownload({
-        file: media,
-        offset: bigInt(liveStartOffset),
-        requestSize: 512 * 1024,
-      });
-
-      // Pull live chunks into the queue without blocking preamble flush
-      (async () => {
-        try {
-          for await (const chunk of iterator) {
-            if (isConnectionClosed || res.destroyed) break;
-            liveChunks.push(chunk);
-            if (liveResolve) { const r = liveResolve; liveResolve = null; r(); }
-          }
-        } catch (e) {
-          liveStreamError = e;
-          if (liveResolve) { const r = liveResolve; liveResolve = null; r(); }
-        } finally {
-          liveStreamDone = true;
-          if (liveResolve) { const r = liveResolve; liveResolve = null; r(); }
-        }
-      })();
-
-      // 2. Flush preamble from RAM instantly (<100ms)
-      if (!isConnectionClosed && !res.destroyed) {
-        const preambleSlice = cachedPreamble.slice(0, Math.min(cachedPreamble.length, bytesNeeded));
-        const canContinue = res.write(preambleSlice);
-        bytesSent += preambleSlice.length;
-
-        if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
-          await new Promise((resolve) => {
-            const onDrain = () => { req.removeListener('close', onClose); resolve(); };
-            const onClose = () => { res.removeListener('drain', onDrain); resolve(); };
-            res.once('drain', onDrain);
-            req.once('close', onClose);
-          });
-        }
+    for await (const chunk of iterator) {
+      if (isConnectionClosed || res.writableEnded || res.destroyed) {
+        iterator.left = 0;
+        await iterator.close().catch(() => {});
+        break;
       }
 
-      // 3. Stream live chunks from queue (already downloading in background)
-      while (bytesSent < bytesNeeded && !isConnectionClosed && !res.writableEnded && !res.destroyed) {
-        // Wait for a live chunk if queue is empty and stream isn't done
-        while (liveChunks.length === 0 && !liveStreamDone && !isConnectionClosed) {
-          await new Promise((resolve) => { liveResolve = resolve; });
-        }
-        if (liveStreamError) throw liveStreamError;
-        if (liveChunks.length === 0) break;
+      let toSend = chunk;
+      let shouldBreak = false;
 
-        let chunk = liveChunks.shift();
-        let toSend = chunk;
-        let shouldBreak = false;
-
-        if (bytesSent + chunk.length > bytesNeeded) {
-          toSend = chunk.slice(0, bytesNeeded - bytesSent);
-          shouldBreak = true;
-        }
-
-        bytesSent += toSend.length;
-        if (bytesSent >= bytesNeeded) shouldBreak = true;
-
-        const canContinue = res.write(toSend);
-        if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
-          await new Promise((resolve) => {
-            const onDrain = () => { req.removeListener('close', onClose); resolve(); };
-            const onClose = () => { res.removeListener('drain', onDrain); resolve(); };
-            res.once('drain', onDrain);
-            req.once('close', onClose);
-          });
-        }
-
-        if (shouldBreak || isConnectionClosed) break;
+      if (bytesSent + chunk.length > bytesNeeded) {
+        toSend = chunk.slice(0, bytesNeeded - bytesSent);
+        shouldBreak = true;
       }
 
-    } else {
+      bytesSent += toSend.length;
+      if (bytesSent >= bytesNeeded) {
+        shouldBreak = true;
+      }
 
-    // ── Fallback: no cache — stream live from Telegram from offset ────────────
-    // (also handles seek requests where start > 0)
-    const liveOffset = start + bytesSent;
-    if (bytesSent < bytesNeeded && !isConnectionClosed) {
-      iterator = client.iterDownload({
-        file: media,
-        offset: bigInt(liveOffset),
-        requestSize: 512 * 1024,
-      });
+      // Handle backpressure: pause pulling chunks if client network buffer is full
+      const canContinue = res.write(toSend);
+      if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
+        await new Promise((resolve) => {
+          const onDrain = () => {
+            req.removeListener('close', onClose);
+            resolve();
+          };
+          const onClose = () => {
+            res.removeListener('drain', onDrain);
+            resolve();
+          };
+          res.once('drain', onDrain);
+          req.once('close', onClose);
+        });
+      }
 
-      for await (const chunk of iterator) {
-        if (isConnectionClosed || res.writableEnded || res.destroyed) {
-          iterator.left = 0;
-          await iterator.close().catch(() => {});
-          break;
-        }
-
-        let toSend = chunk;
-        let shouldBreak = false;
-
-        if (bytesSent + chunk.length > bytesNeeded) {
-          toSend = chunk.slice(0, bytesNeeded - bytesSent);
-          shouldBreak = true;
-        }
-
-        bytesSent += toSend.length;
-        if (bytesSent >= bytesNeeded) {
-          shouldBreak = true;
-        }
-
-        const canContinue = res.write(toSend);
-        if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
-          await new Promise((resolve) => {
-            const onDrain = () => {
-              req.removeListener('close', onClose);
-              resolve();
-            };
-            const onClose = () => {
-              res.removeListener('drain', onDrain);
-              resolve();
-            };
-            res.once('drain', onDrain);
-            req.once('close', onClose);
-          });
-        }
-
-        if (shouldBreak || isConnectionClosed) {
-          iterator.left = 0;
-          await iterator.close().catch(() => {});
-          break;
-        }
+      if (shouldBreak || isConnectionClosed) {
+        iterator.left = 0;
+        await iterator.close().catch(() => {});
+        break;
       }
     }
-    } // end else (fallback block)
 
     if (!res.writableEnded && !isConnectionClosed) {
       res.end();
@@ -1244,8 +1150,6 @@ async function resolveChannel() {
       console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
       try {
         await buildTrackIndex();
-        // Pre-warm fast-start buffer in the background after indexing
-        prewarmAllTracks().catch((e) => console.warn('[FastStart] Pre-warm error:', e.message));
       } catch (err) {
         console.error('Initial indexing error:', err.message);
       }

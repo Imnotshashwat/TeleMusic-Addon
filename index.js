@@ -82,6 +82,11 @@ let lastIndexed = 0;
 // Eliminates the redundant 1-2 second client.getMessages() round-trip on every seek
 const mediaCache = new Map();
 
+// Fast-Start buffer cache: maps track ID -> first 512KB of audio bytes (served from RAM for instant ExoPlayer start)
+// 15 tracks × 512KB ≈ 7.6MB RAM – well within Render's 512MB free tier limit.
+const fastStartCache = new Map();
+const FAST_START_BYTES = 512 * 1024; // 512 KB – covers ~3-4 seconds of lossless FLAC audio
+
 // In-memory request log ring buffer (keeps last 50 requests for production debugging)
 const recentRequests = [];
 function recordRequest(entry) {
@@ -175,6 +180,54 @@ async function getHeaderChunk(media, maxBytes = 128 * 1024) {
   } catch (err) {
     return null;
   }
+}
+
+// Pre-warm the fast-start buffer for a single track:
+// Downloads the first FAST_START_BYTES of audio from Telegram and stores it in RAM.
+// This lets ExoPlayer start playing within 0.3s (served from RAM) while the rest
+// of the FLAC streams live from Telegram in the background.
+async function prewarmFastStart(trackId, media) {
+  if (fastStartCache.has(trackId)) return; // Already cached
+  const chunks = [];
+  let downloaded = 0;
+  try {
+    const iter = client.iterDownload({
+      file: media,
+      offset: bigInt(0),
+      requestSize: 512 * 1024,
+    });
+    for await (const chunk of iter) {
+      chunks.push(chunk);
+      downloaded += chunk.length;
+      if (downloaded >= FAST_START_BYTES) {
+        iter.left = 0;
+        await iter.close();
+        break;
+      }
+    }
+    const buf = Buffer.concat(chunks).slice(0, FAST_START_BYTES);
+    if (buf.length > 0) {
+      fastStartCache.set(trackId, buf);
+      console.log(`[FastStart] Pre-warmed ${buf.length} bytes for track ${trackId}`);
+    }
+  } catch (err) {
+    // Non-fatal: if pre-warm fails, streaming falls back to live MTProto normally
+    console.warn(`[FastStart] Pre-warm failed for track ${trackId}: ${err.message}`);
+  }
+}
+
+// Pre-warm all currently indexed tracks in the background (one at a time to avoid flooding MTProto)
+async function prewarmAllTracks() {
+  console.log(`[FastStart] Starting pre-warm for ${trackIndex.length} track(s)...`);
+  for (const track of trackIndex) {
+    if (fastStartCache.has(track.id)) continue;
+    const media = mediaCache.get(track.id);
+    if (!media) continue;
+    await prewarmFastStart(track.id, media);
+    // Small gap between downloads to avoid rate-limiting Telegram MTProto
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  console.log(`[FastStart] Pre-warm complete! ${fastStartCache.size}/${trackIndex.length} track(s) cached in RAM.`);
 }
 
 async function parseTrackMessage(msg) {
@@ -546,7 +599,7 @@ app.get('/manifest.json', (req, res) => {
   res.json({
     id: 'com.personal.telegrammusic',
     name: 'Telegram Music',
-    version: '1.8.0',
+    version: '1.9.0',
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     resources: ['search', 'stream'],
     types: ['track'],
@@ -896,56 +949,90 @@ app.get('/audio/:id', async (req, res) => {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
     }
 
-    // Use 256KB chunks for faster initial response time and smooth streaming
-    iterator = client.iterDownload({
-      file: media,
-      offset: bigInt(start),
-      requestSize: 256 * 1024,
-    });
-
+    // ── Fast-Start: serve initial audio preamble from RAM ───────────────────
+    // If this is a play-from-start request (start === 0) and we have the first
+    // FAST_START_BYTES cached in RAM, send those bytes instantly (<100ms) so
+    // ExoPlayer can start the audio decoder immediately. The remaining bytes
+    // are then streamed live from Telegram MTProto seamlessly.
     let bytesSent = 0;
+    const cachedPreamble = fastStartCache.get(req.params.id);
+    const useFastStart = (start === 0) && cachedPreamble && cachedPreamble.length > 0;
 
-    for await (const chunk of iterator) {
-      if (isConnectionClosed || res.writableEnded || res.destroyed) {
-        iterator.left = 0;
-        await iterator.close().catch(() => {});
-        break;
+    if (useFastStart) {
+      // How many bytes of the cached preamble does this request actually need?
+      const preambleNeeded = Math.min(cachedPreamble.length, bytesNeeded);
+      const preambleSlice = cachedPreamble.slice(0, preambleNeeded);
+
+      if (isConnectionClosed || res.destroyed) {
+        return;
       }
 
-      let toSend = chunk;
-      let shouldBreak = false;
+      // Flush the preamble to the client instantly from RAM
+      const canContinue = res.write(preambleSlice);
+      bytesSent += preambleSlice.length;
 
-      if (bytesSent + chunk.length > bytesNeeded) {
-        toSend = chunk.slice(0, bytesNeeded - bytesSent);
-        shouldBreak = true;
-      }
-
-      bytesSent += toSend.length;
-      if (bytesSent >= bytesNeeded) {
-        shouldBreak = true;
-      }
-
-      // Handle backpressure: pause pulling chunks if client network buffer is full
-      const canContinue = res.write(toSend);
       if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
         await new Promise((resolve) => {
-          const onDrain = () => {
-            req.removeListener('close', onClose);
-            resolve();
-          };
-          const onClose = () => {
-            res.removeListener('drain', onDrain);
-            resolve();
-          };
+          const onDrain = () => { req.removeListener('close', onClose); resolve(); };
+          const onClose = () => { res.removeListener('drain', onDrain); resolve(); };
           res.once('drain', onDrain);
           req.once('close', onClose);
         });
       }
+    }
 
-      if (shouldBreak || isConnectionClosed) {
-        iterator.left = 0;
-        await iterator.close().catch(() => {});
-        break;
+    // ── Live MTProto Stream: remainder after the fast-start preamble ─────────
+    // Stream using 512KB MTProto blocks (up from 256KB) — halves round-trips.
+    const liveOffset = start + bytesSent;
+    if (bytesSent < bytesNeeded && !isConnectionClosed) {
+      iterator = client.iterDownload({
+        file: media,
+        offset: bigInt(liveOffset),
+        requestSize: 512 * 1024, // 512KB blocks — max MTProto DC supports
+      });
+
+      for await (const chunk of iterator) {
+        if (isConnectionClosed || res.writableEnded || res.destroyed) {
+          iterator.left = 0;
+          await iterator.close().catch(() => {});
+          break;
+        }
+
+        let toSend = chunk;
+        let shouldBreak = false;
+
+        if (bytesSent + chunk.length > bytesNeeded) {
+          toSend = chunk.slice(0, bytesNeeded - bytesSent);
+          shouldBreak = true;
+        }
+
+        bytesSent += toSend.length;
+        if (bytesSent >= bytesNeeded) {
+          shouldBreak = true;
+        }
+
+        // Handle backpressure: pause pulling chunks if client network buffer is full
+        const canContinue = res.write(toSend);
+        if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
+          await new Promise((resolve) => {
+            const onDrain = () => {
+              req.removeListener('close', onClose);
+              resolve();
+            };
+            const onClose = () => {
+              res.removeListener('drain', onDrain);
+              resolve();
+            };
+            res.once('drain', onDrain);
+            req.once('close', onClose);
+          });
+        }
+
+        if (shouldBreak || isConnectionClosed) {
+          iterator.left = 0;
+          await iterator.close().catch(() => {});
+          break;
+        }
       }
     }
 
@@ -986,11 +1073,28 @@ app.get('/debug/requests', (req, res) => {
   });
 });
 
+// Fast-Start cache inspection endpoint
+app.get('/debug/faststart', (req, res) => {
+  const entries = trackIndex.map((t) => ({
+    id: t.id,
+    title: t.title,
+    artist: t.artist,
+    cached: fastStartCache.has(t.id),
+    cachedBytes: fastStartCache.has(t.id) ? fastStartCache.get(t.id).length : 0,
+  }));
+  res.json({
+    fastStartCacheSize: fastStartCache.size,
+    totalTracks: trackIndex.length,
+    cachedBytes: FAST_START_BYTES,
+    tracks: entries,
+  });
+});
+
 // Status / Health endpoint
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '1.8.0',
+    version: '1.9.0',
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
     manifest: `${getBaseUrl(req)}/manifest.json`,
@@ -1079,6 +1183,8 @@ async function resolveChannel() {
       console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
       try {
         await buildTrackIndex();
+        // Pre-warm fast-start buffer in the background after indexing
+        prewarmAllTracks().catch((e) => console.warn('[FastStart] Pre-warm error:', e.message));
       } catch (err) {
         console.error('Initial indexing error:', err.message);
       }

@@ -19,3 +19,4 @@ Thumbs.db
 # Internal agent / local scratch files
 tasks/
 scratch/
+notification_state.json

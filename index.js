@@ -64,6 +64,34 @@ const EXT_TO_FORMAT = {
   alac: 'alac',
 };
 
+// Known composer duos that are hyphenated in FLAC tags but separated with & or comma on YouTube Music / BitChord
+const COMPOSER_DUOS = [
+  [/vishal[-\s–—]+shekhar/gi, 'Vishal & Shekhar'],
+  [/sachin[-\s–—]+jigar/gi, 'Sachin & Jigar'],
+  [/salim[-\s–—]+sulaiman/gi, 'Salim & Sulaiman'],
+  [/shankar[-\s–—]+ehsaan[-\s–—]+loy/gi, 'Shankar & Ehsaan & Loy'],
+  [/ajay[-\s–—]+atul/gi, 'Ajay & Atul'],
+  [/sajid[-\s–—]+wajid/gi, 'Sajid & Wajid'],
+  [/nadeem[-\s–—]+shravan/gi, 'Nadeem & Shravan'],
+  [/jatin[-\s–—]+lalit/gi, 'Jatin & Lalit'],
+  [/anand[-\s–—]+milind/gi, 'Anand & Milind'],
+  [/laxmikant[-\s–—]+pyarelal/gi, 'Laxmikant & Pyarelal'],
+  [/kalyanji[-\s–—]+anandji/gi, 'Kalyanji & Anandji'],
+  [/shiv[-\s–—]+hari/gi, 'Shiv & Hari'],
+  [/raam[-\s–—]+laxman/gi, 'Raam & Laxman'],
+];
+
+function formatArtistForClient(artistStr) {
+  if (!artistStr || artistStr.trim().toLowerCase() === 'unknown artist') return 'Unknown Artist';
+  let formatted = artistStr;
+  for (const [pattern, replacement] of COMPOSER_DUOS) {
+    formatted = formatted.replace(pattern, replacement);
+  }
+  // Also normalize generic " - " (space-dash-space) used to separate multiple artists in tags
+  formatted = formatted.replace(/\s+[-–—]+\s+/g, ', ');
+  return formatted.trim();
+}
+
 const client = new TelegramClient(new StringSession(SESSION_STRING), API_ID, API_HASH, {
   connectionRetries: 5,
 });
@@ -94,6 +122,9 @@ function loadCache() {
     if (fs.existsSync(CACHE_FILE)) {
       const data = fs.readFileSync(CACHE_FILE, 'utf-8');
       trackIndex = JSON.parse(data);
+      for (const t of trackIndex) {
+        if (t.artist) t.artist = formatArtistForClient(t.artist);
+      }
       console.log(`Loaded ${trackIndex.length} track(s) from local cache (${CACHE_FILE}).`);
     }
   } catch (err) {
@@ -312,7 +343,7 @@ async function parseTrackMessage(msg) {
   return {
     id: String(msg.id),
     title: title || fallbackTitle,
-    artist: artist || 'Unknown Artist',
+    artist: formatArtistForClient(artist || 'Unknown Artist'),
     album: album || undefined,
     duration: duration || undefined,
     format: formatName,
@@ -428,6 +459,137 @@ function isDuplicate(a, b) {
   return false;
 }
 
+// ── 6-Hour Digest & 24-Hour Auto-Delete Notifications ──────────────────────
+
+const NOTIF_STATE_FILE = path.join(__dirname, 'notification_state.json');
+const DIGEST_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+let notifState = {
+  pending: [],
+  sentDigests: [],
+  lastDigestSent: 0,
+};
+
+function loadNotificationState() {
+  try {
+    if (fs.existsSync(NOTIF_STATE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(NOTIF_STATE_FILE, 'utf-8'));
+      if (data && Array.isArray(data.pending)) notifState.pending = data.pending;
+      if (data && Array.isArray(data.sentDigests)) notifState.sentDigests = data.sentDigests;
+      if (data && typeof data.lastDigestSent === 'number') notifState.lastDigestSent = data.lastDigestSent;
+      console.log(`[NotificationState] Loaded: ${notifState.pending.length} pending, ${notifState.sentDigests.length} sent digest(s)`);
+    }
+  } catch (err) {
+    console.warn('[NotificationState] Failed to load state:', err.message);
+  }
+}
+
+function saveNotificationState() {
+  try {
+    fs.writeFileSync(NOTIF_STATE_FILE, JSON.stringify(notifState, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('[NotificationState] Failed to save state:', err.message);
+  }
+}
+
+function queueDuplicateNotification(item) {
+  notifState.pending.push({
+    timestamp: Date.now(),
+    ...item,
+  });
+  saveNotificationState();
+  console.log(`[Notification Queue] Queued notification for "${item.title}". Total pending: ${notifState.pending.length}`);
+}
+
+async function cleanupExpiredDigests() {
+  if (!channelEntity || !notifState.sentDigests.length) return;
+  const now = Date.now();
+  const surviving = [];
+  let changed = false;
+  for (const digest of notifState.sentDigests) {
+    if (now - digest.timestamp >= RETENTION_MS) {
+      console.log(`[AutoDelete] Deleting 24h-old digest message ID: ${digest.id}`);
+      await deleteTelegramMessage(digest.id);
+      changed = true;
+    } else {
+      surviving.push(digest);
+    }
+  }
+  if (changed) {
+    notifState.sentDigests = surviving;
+    saveNotificationState();
+  }
+}
+
+async function flushDigestNotifications() {
+  if (!channelEntity) {
+    console.warn('[Digest] Channel entity not initialized yet, skipping digest.');
+    return { sent: false, reason: 'Channel not ready' };
+  }
+
+  // 1. Purge expired digest messages (> 24 hours old) from Telegram channel
+  await cleanupExpiredDigests();
+
+  // 2. If no pending notifications, nothing to send
+  if (notifState.pending.length === 0) {
+    console.log('[Digest] No pending notifications to flush.');
+    return { sent: false, reason: 'Queue empty', purgedExpired: notifState.sentDigests.length };
+  }
+
+  // 3. Format consolidated digest message
+  const items = [...notifState.pending];
+  const maxDisplay = 15;
+  const displayed = items.slice(0, maxDisplay);
+  const remainingCount = items.length - displayed.length;
+
+  let text = `🧹 <b>Library Cleanup Digest (6h Summary)</b>\n\n`;
+  for (const item of displayed) {
+    const action = item.action === 'upgrade' ? 'Quality Upgrade' : (item.action === 'cleanup' ? 'Library Cleanup' : 'Duplicate Removed');
+    text += `• <b>${item.title}</b> — <i>${item.artist}</i>\n`;
+    text += `  ✅ Kept: ${item.keptQuality} [${item.keptSize}]\n`;
+    text += `  ❌ Deleted: ${item.deletedQuality} [${item.deletedSize}] (${action})\n\n`;
+  }
+
+  if (remainingCount > 0) {
+    text += `<i>... and ${remainingCount} more track(s) cleaned.</i>\n\n`;
+  }
+
+  text += `📊 <b>Total:</b> ${items.length} duplicate(s) cleaned.\n`;
+  text += `⏳ <i>This notification automatically deletes after 24 hours.</i>`;
+
+  const now = Date.now();
+  try {
+    const sent = await client.sendMessage(channelEntity, { message: text, parseMode: 'html' });
+    if (sent && sent.id) {
+      notifState.sentDigests.push({
+        id: sent.id,
+        timestamp: now,
+        count: items.length,
+      });
+      notifState.pending = [];
+      notifState.lastDigestSent = now;
+      saveNotificationState();
+      console.log(`[Digest Sent] Sent digest message ID: ${sent.id} with ${items.length} items.`);
+      return { sent: true, messageId: sent.id, count: items.length };
+    }
+  } catch (err) {
+    console.error('[Digest Error] Failed to send digest:', err.message);
+    return { sent: false, error: err.message };
+  }
+
+  return { sent: false };
+}
+
+function checkDigestSchedule() {
+  const now = Date.now();
+  if (now - notifState.lastDigestSent >= DIGEST_INTERVAL_MS) {
+    flushDigestNotifications().catch((e) => console.error('[Digest Scheduler Error]:', e.message));
+  } else {
+    cleanupExpiredDigests().catch((e) => console.error('[AutoDelete Error]:', e.message));
+  }
+}
+
 async function sendChannelNotification(text) {
   try {
     if (channelEntity) {
@@ -480,13 +642,15 @@ async function processTrackUpload(newTrack) {
     trackIndex.unshift(newTrack);
     saveCache();
 
-    const notif =
-      `🗑️ Duplicate Removed (Quality Upgrade)\n\n` +
-      `🎵 Track: ${newTrack.title} — ${newTrack.artist}\n` +
-      `✅ Kept (New): ${describeTrackQuality(newTrack)} [${formatBytes(newTrack.sizeBytes)}]\n` +
-      `❌ Deleted (Old): ${describeTrackQuality(existingDup)} [${formatBytes(existingDup.sizeBytes)}]\n` +
-      `💡 Reason: Higher resolution audio detected. Automatically upgraded your library!`;
-    await sendChannelNotification(notif);
+    queueDuplicateNotification({
+      action: 'upgrade',
+      title: newTrack.title,
+      artist: newTrack.artist,
+      keptQuality: describeTrackQuality(newTrack),
+      keptSize: formatBytes(newTrack.sizeBytes),
+      deletedQuality: describeTrackQuality(existingDup),
+      deletedSize: formatBytes(existingDup.sizeBytes),
+    });
 
     return newTrack;
   } else {
@@ -496,13 +660,15 @@ async function processTrackUpload(newTrack) {
     await deleteTelegramMessage(newTrack.id);
 
     const isLower = scoreNew < scoreOld;
-    const notif =
-      `🗑️ Duplicate Removed\n\n` +
-      `🎵 Track: ${newTrack.title} — ${newTrack.artist}\n` +
-      `✅ Kept (Library): ${describeTrackQuality(existingDup)} [${formatBytes(existingDup.sizeBytes)}]\n` +
-      `❌ Deleted (Upload): ${describeTrackQuality(newTrack)} [${formatBytes(newTrack.sizeBytes)}]\n` +
-      `💡 Reason: ${isLower ? 'Channel already contains a higher quality version.' : 'Exact duplicate already present in library.'}`;
-    await sendChannelNotification(notif);
+    queueDuplicateNotification({
+      action: 'discard',
+      title: newTrack.title,
+      artist: newTrack.artist,
+      keptQuality: describeTrackQuality(existingDup),
+      keptSize: formatBytes(existingDup.sizeBytes),
+      deletedQuality: describeTrackQuality(newTrack),
+      deletedSize: formatBytes(newTrack.sizeBytes),
+    });
 
     return null;
   }
@@ -523,13 +689,15 @@ async function deduplicateEntireLibrary() {
       await deleteTelegramMessage(track.id);
       removed.push({ deleted: track, kept: dup });
 
-      const notif =
-        `🗑️ Duplicate Cleaned\n\n` +
-        `🎵 Track: ${dup.title} — ${dup.artist}\n` +
-        `✅ Kept: ${describeTrackQuality(dup)} [${formatBytes(dup.sizeBytes)}]\n` +
-        `❌ Deleted: ${describeTrackQuality(track)} [${formatBytes(track.sizeBytes)}]\n` +
-        `💡 Reason: Library cleanup: lower/duplicate quality removed.`;
-      await sendChannelNotification(notif);
+      queueDuplicateNotification({
+        action: 'cleanup',
+        title: dup.title,
+        artist: dup.artist,
+        keptQuality: describeTrackQuality(dup),
+        keptSize: formatBytes(dup.sizeBytes),
+        deletedQuality: describeTrackQuality(track),
+        deletedSize: formatBytes(track.sizeBytes),
+      });
     }
   }
 
@@ -615,6 +783,34 @@ app.get('/deduplicate', async (req, res) => {
         kept: describeTrackQuality(r.kept),
         deleted: describeTrackQuality(r.deleted),
       })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Notification status endpoint: check queued duplicate notifications and digest history
+app.get('/notifications/status', (req, res) => {
+  const now = Date.now();
+  const nextDueMs = Math.max(0, DIGEST_INTERVAL_MS - (now - notifState.lastDigestSent));
+  res.json({
+    status: 'ok',
+    pendingCount: notifState.pending.length,
+    pending: notifState.pending,
+    sentDigestsCount: notifState.sentDigests.length,
+    sentDigests: notifState.sentDigests,
+    lastDigestSent: notifState.lastDigestSent ? new Date(notifState.lastDigestSent).toISOString() : 'never',
+    nextDigestDueInMinutes: Math.round(nextDueMs / 60000),
+  });
+});
+
+// Manual digest trigger: flush pending duplicate/deleted notifications to Telegram channel now
+app.get('/notifications/flush', async (req, res) => {
+  try {
+    const result = await flushDigestNotifications();
+    res.json({
+      status: 'ok',
+      result,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -785,7 +981,7 @@ app.get('/search', async (req, res) => {
       tracks: matches.slice(0, 60).map((t) => ({
         id: t.id,
         title: t.title,
-        artist: t.artist,
+        artist: formatArtistForClient(t.artist),
         album: t.album || '',
         duration: t.duration,
         format: t.format,
@@ -1118,6 +1314,7 @@ async function resolveChannel() {
 (async () => {
   try {
     loadCache();
+    loadNotificationState();
     console.log('Connecting to Telegram MTProto...');
     await client.connect();
     console.log('Connected to Telegram!');
@@ -1160,11 +1357,15 @@ async function resolveChannel() {
       }
     }, new NewMessage({}));
 
+    // Start 6-hour digest and 24-hour auto-deletion interval checker (checks every 10 minutes)
+    setInterval(checkDigestSchedule, 10 * 60 * 1000);
+
     app.listen(PORT, '0.0.0.0', async () => {
       console.log(`BitChord Addon server running on http://0.0.0.0:${PORT}`);
       console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
       try {
         await buildTrackIndex();
+        checkDigestSchedule();
       } catch (err) {
         console.error('Initial indexing error:', err.message);
       }

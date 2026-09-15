@@ -459,11 +459,11 @@ function isDuplicate(a, b) {
   return false;
 }
 
-// ── 6-Hour Digest & 24-Hour Auto-Delete Notifications ──────────────────────
+// ── 30-Minute Digest & 12-Hour Auto-Delete Notifications ──────────────────────
 
 const NOTIF_STATE_FILE = path.join(__dirname, 'notification_state.json');
-const DIGEST_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
+const DIGEST_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const RETENTION_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 let notifState = {
   pending: [],
@@ -509,7 +509,7 @@ async function cleanupExpiredDigests() {
   let changed = false;
   for (const digest of notifState.sentDigests) {
     if (now - digest.timestamp >= RETENTION_MS) {
-      console.log(`[AutoDelete] Deleting 24h-old digest message ID: ${digest.id}`);
+      console.log(`[AutoDelete] Deleting 12h-old digest message ID: ${digest.id}`);
       await deleteTelegramMessage(digest.id);
       changed = true;
     } else {
@@ -528,7 +528,7 @@ async function flushDigestNotifications() {
     return { sent: false, reason: 'Channel not ready' };
   }
 
-  // 1. Purge expired digest messages (> 24 hours old) from Telegram channel
+  // 1. Purge expired digest messages (> 12 hours old) from Telegram channel
   await cleanupExpiredDigests();
 
   // 2. If no pending notifications, nothing to send
@@ -543,7 +543,7 @@ async function flushDigestNotifications() {
   const displayed = items.slice(0, maxDisplay);
   const remainingCount = items.length - displayed.length;
 
-  let text = `🧹 <b>Library Cleanup Digest (6h Summary)</b>\n\n`;
+  let text = `🧹 <b>Library Cleanup Digest (30m Summary)</b>\n\n`;
   for (const item of displayed) {
     const action = item.action === 'upgrade' ? 'Quality Upgrade' : (item.action === 'cleanup' ? 'Library Cleanup' : 'Duplicate Removed');
     text += `• <b>${item.title}</b> — <i>${item.artist}</i>\n`;
@@ -556,7 +556,7 @@ async function flushDigestNotifications() {
   }
 
   text += `📊 <b>Total:</b> ${items.length} duplicate(s) cleaned.\n`;
-  text += `⏳ <i>This notification automatically deletes after 24 hours.</i>`;
+  text += `⏳ <i>This notification automatically deletes after 12 hours.</i>`;
 
   const now = Date.now();
   try {
@@ -705,6 +705,7 @@ async function deduplicateEntireLibrary() {
     trackIndex = kept;
     saveCache();
     console.log(`Deduplication complete! Removed ${removed.length} duplicate(s).`);
+    await flushDigestNotifications();
   } else {
     console.log('Deduplication check: Library is 100% clean, no duplicates found.');
   }
@@ -1357,8 +1358,8 @@ async function resolveChannel() {
       }
     }, new NewMessage({}));
 
-    // Start 6-hour digest and 24-hour auto-deletion interval checker (checks every 10 minutes)
-    setInterval(checkDigestSchedule, 10 * 60 * 1000);
+    // Start 30-minute digest and 12-hour auto-deletion interval checker (checks every 5 minutes)
+    setInterval(checkDigestSchedule, 5 * 60 * 1000);
 
     app.listen(PORT, '0.0.0.0', async () => {
       console.log(`BitChord Addon server running on http://0.0.0.0:${PORT}`);
